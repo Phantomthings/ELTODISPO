@@ -2376,8 +2376,7 @@ def get_equipment_summary(
             "Durée Totale",
             "Temps Disponible",
             "Temps Indisponible",
-            "Temps Disponible avec exclusions",
-            "Temps Indisponible avec exclusions",
+            "Jours avec des données",
         ])
 
     df = load_filtered_blocks(start_dt, end_dt, site, None, mode=active_mode)
@@ -2390,8 +2389,7 @@ def get_equipment_summary(
                 "Durée Totale": "0 minutes",
                 "Temps Disponible": "0 minutes",
                 "Temps Indisponible": "0 minutes",
-                "Temps Disponible avec exclusions": "0 minutes",
-                "Temps Indisponible avec exclusions": "0 minutes",
+                "Jours avec des données": 0,
             }
             for equip in equipments
         ])
@@ -2407,13 +2405,15 @@ def get_equipment_summary(
                 "Durée Totale": "0 minutes",
                 "Temps Disponible": "0 minutes",
                 "Temps Indisponible": "0 minutes",
-                "Temps Disponible avec exclusions": "0 minutes",
-                "Temps Indisponible avec exclusions": "0 minutes",
+                "Jours avec des données": 0,
             })
             continue
 
         stats_raw = calculate_availability(equip_data, include_exclusions=False)
         stats_excl = calculate_availability(equip_data, include_exclusions=True)
+        days_with_data = (
+            pd.to_datetime(equip_data["date_debut"]).dt.floor("D").nunique()
+        )
         summary_rows.append({
             "Équipement": equip,
             "Disponibilité Brute (%)": round(stats_raw["pct_available"], 2),
@@ -2421,13 +2421,15 @@ def get_equipment_summary(
             "Durée Totale": format_minutes(stats_raw["total_minutes"]),
             "Temps Disponible": format_minutes(stats_raw["available_minutes"]),
             "Temps Indisponible": format_minutes(stats_raw["unavailable_minutes"]),
-            "Temps Disponible avec exclusions": format_minutes(stats_excl["available_minutes"]),
-            "Temps Indisponible avec exclusions": format_minutes(stats_excl["unavailable_minutes"]),
+            "Jours avec des données": int(days_with_data),
         })
 
     if active_mode == MODE_PDC and not df.empty:
         global_stats_raw = calculate_availability(df, include_exclusions=False)
         global_stats_excl = calculate_availability(df, include_exclusions=True)
+        global_days = (
+            pd.to_datetime(df["date_debut"]).dt.floor("D").nunique()
+        )
         if site:
             label = "Dispo globale site"
         else:
@@ -2439,8 +2441,7 @@ def get_equipment_summary(
             "Durée Totale": format_minutes(global_stats_raw["total_minutes"]),
             "Temps Disponible": format_minutes(global_stats_raw["available_minutes"]),
             "Temps Indisponible": format_minutes(global_stats_raw["unavailable_minutes"]),
-            "Temps Disponible avec exclusions": format_minutes(global_stats_excl["available_minutes"]),
-            "Temps Indisponible avec exclusions": format_minutes(global_stats_excl["unavailable_minutes"]),
+            "Jours avec des données": int(global_days),
         }
         summary_rows = [global_row] + summary_rows
 
@@ -2919,9 +2920,9 @@ def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
     return site, equip, start_dt, end_dt
 
 def render_overview_tab(df: Optional[pd.DataFrame]):
-    """Affiche l'onglet des indicateurs clés."""
+    """Affiche l'onglet vue d'ensemble."""
     mode = get_current_mode()
-    st.header("📊 Indicateurs Clés - Equipement concerné")
+    st.header("📈 Vue d'Ensemble")
 
     site_scope = st.session_state.get("current_site")
     equip_scope = st.session_state.get("current_equip")
@@ -2941,6 +2942,56 @@ def render_overview_tab(df: Optional[pd.DataFrame]):
         st.info("💡 Conseil: Essayez d'élargir la période ou de modifier les filtres.")
         return
 
+    stats_raw = calculate_availability(df, include_exclusions=False)
+    stats_excl = calculate_availability(df, include_exclusions=True)
+
+    st.subheader("📊 Indicateurs Clés")
+    col1, col2, col3, col4 = st.columns(4)
+
+    with col1:
+        st.metric(
+            "Disponibilité brute",
+            f"{stats_raw['pct_available']:.2f}%",
+            help="Valeur correspondant au calcul standard"
+        )
+
+    with col2:
+        st.metric(
+            "Disponibilité avec exclusions",
+            f"{stats_excl['pct_available']:.2f}%",
+            delta=f"{stats_excl['pct_available'] - stats_raw['pct_available']:.2f}%",
+            help="Différence par rapport au calcul brut"
+        )
+
+    with col3:
+        analyzed_minutes = stats_excl['effective_minutes']
+        analyzed_delta = analyzed_minutes - stats_raw['effective_minutes']
+        if analyzed_delta:
+            delta_prefix = "+" if analyzed_delta > 0 else "-"
+            delta_value = f"{delta_prefix} {format_minutes(abs(analyzed_delta))}"
+        else:
+            delta_value = None
+
+        st.metric(
+            "Temps analysé",
+            format_minutes(analyzed_minutes),
+            delta=delta_value,
+            help=(
+                "Temps total disposant de données après application des exclusions "
+                f"(données manquantes initiales : {format_minutes(stats_raw['missing_minutes'])})."
+            )
+        )
+
+    with col4:
+        st.metric(
+            "Temps Indisponible (avec exclusions)",
+            format_minutes(stats_excl['unavailable_minutes']),
+            delta=f"{stats_excl['unavailable_minutes'] - stats_raw['unavailable_minutes']} min",
+            delta_color="inverse", 
+            help="Temps total d'indisponibilité après application des exclusions"
+        )
+    st.divider()
+    
     st.subheader("📋 Tableau Récapitulatif des Équipements")
     
     site_current = st.session_state.get("current_site")
@@ -2971,14 +3022,10 @@ def render_overview_tab(df: Optional[pd.DataFrame]):
                     "Durée Totale": st.column_config.TextColumn("Durée Totale", width="medium"),
                     "Temps Disponible": st.column_config.TextColumn("Temps Disponible", width="medium"),
                     "Temps Indisponible": st.column_config.TextColumn("Temps Indisponible", width="medium"),
-                    "Temps Disponible avec exclusions": st.column_config.TextColumn(
-                        "Temps Disponible avec exclusions",
-                        width="medium"
-                    ),
-                    "Temps Indisponible avec exclusions": st.column_config.TextColumn(
-                        "Temps Indisponible avec exclusions",
-                        width="medium"
-                    ),
+                    "Jours avec des données": st.column_config.NumberColumn(
+                        "Jours avec des données",
+                        width="small"
+                    )
                 }
             )
             
@@ -2993,16 +3040,16 @@ def render_overview_tab(df: Optional[pd.DataFrame]):
                     pct_excl = row["Disponibilité Avec Exclusions (%)"]
 
                     # Couleur selon la disponibilité
-                    if pct_excl >= 95:
+                    if pct_brut >= 95:
                         color = "normal"
-                    elif pct_excl >= 90:
+                    elif pct_brut >= 90:
                         color = "off"
                     else:
                         color = "inverse"
-
+                    
                     st.metric(
-                        f"{equip} - Disponibilité avec exclusions",
-                        f"{pct_excl:.2f}%",
+                        f"{equip} - Disponibilité",
+                        f"{pct_brut:.2f}%",
                         delta=f"{pct_excl - pct_brut:.2f}%",
                         delta_color=color,
                         help=f"Brute: {pct_brut:.2f}% | Avec exclusions: {pct_excl:.2f}%"
@@ -3385,58 +3432,7 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
     if df.empty:
         st.warning("⚠️ Aucune donnée disponible pour cet équipement sur cette période.")
         return
-
-    stats_raw = calculate_availability(df, include_exclusions=False)
-    stats_excl = calculate_availability(df, include_exclusions=True)
-
-    st.subheader("📊 Indicateurs Clés - Equipement concerné")
-    col1, col2, col3, col4 = st.columns(4)
-
-    with col1:
-        st.metric(
-            "Disponibilité brute",
-            f"{stats_raw['pct_available']:.2f}%",
-            help="Valeur correspondant au calcul standard"
-        )
-
-    with col2:
-        st.metric(
-            "Disponibilité avec exclusions",
-            f"{stats_excl['pct_available']:.2f}%",
-            delta=f"{stats_excl['pct_available'] - stats_raw['pct_available']:.2f}%",
-            help="Différence par rapport au calcul brut"
-        )
-
-    with col3:
-        analyzed_minutes = stats_excl['effective_minutes']
-        analyzed_delta = analyzed_minutes - stats_raw['effective_minutes']
-        if analyzed_delta:
-            delta_prefix = "+" if analyzed_delta > 0 else "-"
-            delta_value = f"{delta_prefix} {format_minutes(abs(analyzed_delta))}"
-        else:
-            delta_value = None
-
-        st.metric(
-            "Temps analysé",
-            format_minutes(analyzed_minutes),
-            delta=delta_value,
-            help=(
-                "Temps total disposant de données après application des exclusions "
-                f"(données manquantes initiales : {format_minutes(stats_raw['missing_minutes'])})."
-            )
-        )
-
-    with col4:
-        st.metric(
-            "Temps Indisponible (avec exclusions)",
-            format_minutes(stats_excl['unavailable_minutes']),
-            delta=f"{stats_excl['unavailable_minutes'] - stats_raw['unavailable_minutes']} min",
-            delta_color="inverse",
-            help="Temps total d'indisponibilité après application des exclusions"
-        )
-
-    st.divider()
-
+    
     df_plot = df.copy()
     df_plot["start"] = pd.to_datetime(df_plot["date_debut"])
     df_plot["end"] = pd.to_datetime(df_plot["date_fin"])
@@ -4554,8 +4550,7 @@ def _filter_pdc_summary_for_pdf(summary: Optional[pd.DataFrame]) -> pd.DataFrame
         "Durée Totale",
         "Temps Disponible",
         "Temps Indisponible",
-        "Temps Disponible avec exclusions",
-        "Temps Indisponible avec exclusions",
+        "Jours avec des données",
     ]
     if summary is None or summary.empty:
         return pd.DataFrame(columns=columns)
@@ -5519,10 +5514,10 @@ def main():
         st.caption(f"📊 {len(df_filtered)} blocs chargés pour la période sélectionnée")
     
     tabs = st.tabs([
+        "📈 Vue d'ensemble",
         "📊 Timeline - Exclusions/annotations rapides",
-        "⏱️ Timeline & Annotations - Équipement",
-        "📊 Indicateurs Clés - Equipement concerné",
         "🌍 Comparaison sites",
+        "⏱️ Timeline & Annotations - Équipement",
         "📊 Rapport",
         "🚫 Exclusions",
         "💬 Commentaires",
@@ -5531,16 +5526,16 @@ def main():
     ])
 
     with tabs[0]:
-        render_statistics_tab()
-
-    with tabs[1]:
-        render_timeline_tab(site, equip, start_dt, end_dt)
-
-    with tabs[2]:
         render_overview_tab(df_filtered)
 
-    with tabs[3]:
+    with tabs[1]:
+        render_statistics_tab()
+
+    with tabs[2]:
         render_global_comparison_tab(start_dt, end_dt)
+
+    with tabs[3]:
+        render_timeline_tab(site, equip, start_dt, end_dt)
 
     with tabs[4]:
         render_report_tab()
