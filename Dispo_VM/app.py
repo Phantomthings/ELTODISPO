@@ -2430,7 +2430,6 @@ def get_equipment_summary(
                 "Temps Indisponible": "0 minutes",
                 "Temps Disponible Avec Exclusions": "0 minutes",
                 "Temps Indisponible Avec Exclusions": "0 minutes",
-                "Jours avec des données": 0,
             }
             for equip in equipments
         ])
@@ -2454,15 +2453,11 @@ def get_equipment_summary(
                 "Temps Indisponible": "0 minutes",
                 "Temps Disponible Avec Exclusions": "0 minutes",
                 "Temps Indisponible Avec Exclusions": "0 minutes",
-                "Jours avec des données": 0,
             })
             continue
 
         stats_raw = calculate_availability(equip_data, include_exclusions=False)
         stats_excl = calculate_availability(equip_data, include_exclusions=True)
-        days_with_data = (
-            pd.to_datetime(equip_data["date_debut"]).dt.floor("D").nunique()
-        )
         summary_rows.append({
             "Équipement": equip,
             "Disponibilité Brute (%)": round(stats_raw["pct_available"], 2),
@@ -2473,7 +2468,6 @@ def get_equipment_summary(
             "Temps Indisponible": format_minutes(stats_raw["unavailable_minutes"]),
             "Temps Disponible Avec Exclusions": format_minutes(stats_excl["available_minutes"]),
             "Temps Indisponible Avec Exclusions": format_minutes(stats_excl["unavailable_minutes"]),
-            "Jours avec des données": int(days_with_data),
         })
 
     return pd.DataFrame(summary_rows)
@@ -2898,14 +2892,25 @@ def render_overview_tab(
 
     general_available = df_general is not None and not df_general.empty
     global_summary_row: Optional[Dict[str, Any]] = None
+    site_summary_row: Optional[Dict[str, Any]] = None
     if general_available:
         stats_raw = calculate_availability(df_general, include_exclusions=False)
         stats_excl = calculate_availability(df_general, include_exclusions=True)
 
+        if not _is_global_site_selection(site_scope):
+            site_summary_row = {
+                "Équipement": "Globale site",
+                "Disponibilité Brute (%)": round(stats_raw["pct_available"], 2),
+                "Disponibilité Avec Exclusions (%)": round(stats_excl["pct_available"], 2),
+                "Durée Totale": format_minutes(stats_raw["total_minutes"]),
+                "Temps Analysé": format_minutes(stats_excl["effective_minutes"]),
+                "Temps Disponible": format_minutes(stats_raw["available_minutes"]),
+                "Temps Indisponible": format_minutes(stats_raw["unavailable_minutes"]),
+                "Temps Disponible Avec Exclusions": format_minutes(stats_excl["available_minutes"]),
+                "Temps Indisponible Avec Exclusions": format_minutes(stats_excl["unavailable_minutes"]),
+            }
+
         if _is_global_site_selection(site_scope):
-            days_with_data = (
-                pd.to_datetime(df_general["date_debut"]).dt.floor("D").nunique()
-            )
             global_summary_row = {
                 "Équipement": "Global (tous équipements)",
                 "Disponibilité Brute (%)": round(stats_raw["pct_available"], 2),
@@ -2916,7 +2921,6 @@ def render_overview_tab(
                 "Temps Indisponible": format_minutes(stats_raw["unavailable_minutes"]),
                 "Temps Disponible Avec Exclusions": format_minutes(stats_excl["available_minutes"]),
                 "Temps Indisponible Avec Exclusions": format_minutes(stats_excl["unavailable_minutes"]),
-                "Jours avec des données": int(days_with_data),
             }
 
         st.divider()
@@ -2930,11 +2934,14 @@ def render_overview_tab(
         if start_dt_current and end_dt_current:
             df_summary = get_equipment_summary(start_dt_current, end_dt_current, site_current, mode=mode)
 
+            summary_frames: List[pd.DataFrame] = []
             if global_summary_row is not None:
-                df_summary = pd.concat(
-                    [pd.DataFrame([global_summary_row]), df_summary],
-                    ignore_index=True,
-                )
+                summary_frames.append(pd.DataFrame([global_summary_row]))
+            if site_summary_row is not None:
+                summary_frames.append(pd.DataFrame([site_summary_row]))
+
+            if summary_frames:
+                df_summary = pd.concat([*summary_frames, df_summary], ignore_index=True)
 
             if not df_summary.empty:
                 st.dataframe(
@@ -2965,10 +2972,6 @@ def render_overview_tab(
                             "Temps Indisponible Avec Exclusions",
                             width="medium"
                         ),
-                        "Jours avec des données": st.column_config.NumberColumn(
-                            "Jours avec des données",
-                            width="small"
-                        )
                     }
                 )
             else:
@@ -3237,17 +3240,21 @@ def render_global_comparison_tab(start_dt: datetime, end_dt: datetime) -> None:
         return
 
     if mode == MODE_EQUIPMENT:
-        st.subheader("Récap AC / DC1 / DC2")
+        st.subheader("Récap AC / BATT / PDC1-6")
         if "type_equipement" not in df_all.columns:
             st.info("Les données de type équipement ne sont pas disponibles pour cette vue.")
             return
 
-        base_types = ["AC", "DC1", "DC2"]
+        priority_types = [
+            "AC",
+            "BATT",
+            *[f"PDC{i}" for i in range(1, 7)],
+        ]
         additional_types = [
             t for t in df_all["type_equipement"].dropna().unique().tolist()
-            if t not in base_types
+            if t not in priority_types
         ]
-        type_sequence = base_types + additional_types
+        type_sequence = priority_types + additional_types
 
         site_rows: List[Dict[str, Optional[float]]] = []
         for site, site_df in df_all.groupby("site"):
@@ -4578,7 +4585,6 @@ def _filter_pdc_summary_for_pdf(summary: Optional[pd.DataFrame]) -> pd.DataFrame
         "Durée Totale",
         "Temps Disponible",
         "Temps Indisponible",
-        "Jours avec des données",
     ]
     if summary is None or summary.empty:
         return pd.DataFrame(columns=columns)
