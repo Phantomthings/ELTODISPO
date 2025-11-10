@@ -52,7 +52,36 @@ MODE_LABELS = {
     MODE_EQUIPMENT: "Disponibilité équipements",
     MODE_PDC: "Disponibilité points de charge",
 }
+ALL_EQUIPMENT_CHOICES = [
+    "PDC1",
+    "PDC2",
+    "PDC3",
+    "PDC4",
+    "PDC5",
+    "PDC6",
+    "AC",
+    "DC1",
+    "DC2",
+]
 GENERIC_SCOPE_TOKENS = ("tous", "toutes", "all", "global", "ensemble", "général", "general")
+
+
+def _all_equipment_options() -> List[str]:
+    """Retourne la liste standardisée des équipements disponibles pour les filtres."""
+
+    return list(ALL_EQUIPMENT_CHOICES)
+
+
+def _is_pdc_equipment(equip: Optional[str]) -> bool:
+    """Indique si l'identifiant correspond à un point de charge."""
+
+    return isinstance(equip, str) and equip.upper().startswith("PDC")
+
+
+def _mode_for_equipment(equip: Optional[str]) -> str:
+    """Retourne le mode de chargement adéquat en fonction de l'équipement."""
+
+    return MODE_PDC if _is_pdc_equipment(equip) else MODE_EQUIPMENT
 
 def _format_timestamp_display(value: Any) -> str:
     if isinstance(value, pd.Timestamp):
@@ -2366,21 +2395,17 @@ def get_equipment_summary(
     mode: Optional[str] = None,
 ) -> pd.DataFrame:
     """Génère un tableau récapitulatif des équipements pour le mode actif."""
-    active_mode = mode or get_current_mode()
-    equipments = get_equipments(active_mode, site)
-    if not equipments:
-        return pd.DataFrame(columns=[
-            "Équipement",
-            "Disponibilité Brute (%)",
-            "Disponibilité Avec Exclusions (%)",
-            "Durée Totale",
-            "Temps Disponible",
-            "Temps Indisponible",
-            "Jours avec des données",
-        ])
+    equipments = _all_equipment_options()
+    equipment_df = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_EQUIPMENT)
+    pdc_df = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_PDC)
 
-    df = load_filtered_blocks(start_dt, end_dt, site, None, mode=active_mode)
-    if df.empty:
+    frames: List[pd.DataFrame] = []
+    if equipment_df is not None and not equipment_df.empty:
+        frames.append(equipment_df)
+    if pdc_df is not None and not pdc_df.empty:
+        frames.append(pdc_df)
+
+    if not frames:
         return pd.DataFrame([
             {
                 "Équipement": equip,
@@ -2396,7 +2421,12 @@ def get_equipment_summary(
 
     summary_rows = []
     for equip in equipments:
-        equip_data = df[df["equipement_id"] == equip]
+        if _is_pdc_equipment(equip):
+            source_df = pdc_df if pdc_df is not None else pd.DataFrame()
+        else:
+            source_df = equipment_df if equipment_df is not None else pd.DataFrame()
+
+        equip_data = source_df[source_df["equipement_id"] == equip] if not source_df.empty else pd.DataFrame()
         if equip_data.empty:
             summary_rows.append({
                 "Équipement": equip,
@@ -2424,27 +2454,6 @@ def get_equipment_summary(
             "Jours avec des données": int(days_with_data),
         })
 
-    if active_mode == MODE_PDC and not df.empty:
-        global_stats_raw = calculate_availability(df, include_exclusions=False)
-        global_stats_excl = calculate_availability(df, include_exclusions=True)
-        global_days = (
-            pd.to_datetime(df["date_debut"]).dt.floor("D").nunique()
-        )
-        if site:
-            label = "Dispo globale site"
-        else:
-            label = "Dispo globale (tous sites)"
-        global_row = {
-            "Équipement": label,
-            "Disponibilité Brute (%)": round(global_stats_raw["pct_available"], 2),
-            "Disponibilité Avec Exclusions (%)": round(global_stats_excl["pct_available"], 2),
-            "Durée Totale": format_minutes(global_stats_raw["total_minutes"]),
-            "Temps Disponible": format_minutes(global_stats_raw["available_minutes"]),
-            "Temps Indisponible": format_minutes(global_stats_raw["unavailable_minutes"]),
-            "Jours avec des données": int(global_days),
-        }
-        summary_rows = [global_row] + summary_rows
-
     return pd.DataFrame(summary_rows)
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -2455,168 +2464,98 @@ def generate_availability_report(
     mode: Optional[str] = None,
 ) -> Dict[str, pd.DataFrame]:
     """Génère un rapport complet de disponibilité pour tous les équipements."""
-    active_mode = mode or get_current_mode()
-    equipments = get_equipments(active_mode, site)
-    if not equipments:
-        return {}
 
-    params = {"start": start_dt, "end": end_dt}
-    if active_mode == MODE_PDC:
-        if site:
-            union_sql = _pdc_union_sql_for_site(site)
-            params["site"] = site
-            site_filter = "AND b.site = :site"
-        else:
-            union_sql = _pdc_union_sql_all_sites()
-            site_filter = ""
-        q = f"""
-        WITH base AS (
-            {union_sql}
-        )
-        SELECT
-          b.bloc_id,
-          b.site, b.equipement_id, b.date_debut, b.date_fin, b.est_disponible, b.cause,
-          TIMESTAMPDIFF(MINUTE, GREATEST(b.date_debut,:start), LEAST(b.date_fin,:end)) AS duration_minutes,
-          COALESCE(e.previous_status, b.est_disponible) AS previous_status,
-          CASE WHEN e.id IS NOT NULL THEN 1 ELSE 0 END AS is_excluded,
-          e.id AS exclusion_id,
-          e.applied_by AS exclusion_applied_by,
-          e.applied_at AS exclusion_applied_at,
-          e.exclusion_comment AS exclusion_comment,
-          b.source_table
-        FROM base b
-        LEFT JOIN dispo_blocs_exclusions e
-          ON e.table_name = b.source_table
-         AND e.bloc_id = b.bloc_id
-         AND e.released_at IS NULL
-        WHERE b.date_debut < :end AND b.date_fin > :start
-          {site_filter}
-        ORDER BY b.equipement_id, b.date_debut
-        """
-    else:
-        if site:
-            ac_union = _ac_union_sql_for_site(site)
-            batt_union = _batt_union_sql_for_site(site)
-            params["site"] = site
-            site_filter_ac = "WHERE site = :site"
-            site_filter_bt = "WHERE site = :site"
-        else:
-            ac_union = _ac_union_sql_all_sites()
-            batt_union = _batt_union_sql_all_sites()
-            site_filter_ac = ""
-            site_filter_bt = ""
-
-        q = f"""
-        WITH ac AS (
-            {ac_union}
-        ),
-        batt AS (
-            {batt_union}
-        ),
-        base AS (
-            SELECT
-              bloc_id, source_table,
-              site, equipement_id, type_equipement, date_debut, date_fin,
-              est_disponible, cause, raw_point_count, processed_at, batch_id, hash_signature
-            FROM ac {site_filter_ac}
-            UNION ALL
-            SELECT
-              bloc_id, source_table,
-              site, equipement_id, type_equipement, date_debut, date_fin,
-              est_disponible, cause, raw_point_count, processed_at, batch_id, hash_signature
-            FROM batt {site_filter_bt}
-        )
-        SELECT
-          b.bloc_id,
-          b.site, b.equipement_id, b.date_debut, b.date_fin, b.est_disponible, b.cause,
-          TIMESTAMPDIFF(MINUTE, GREATEST(b.date_debut,:start), LEAST(b.date_fin,:end)) AS duration_minutes,
-          COALESCE(e.previous_status, b.est_disponible) AS previous_status,
-          CASE WHEN e.id IS NOT NULL THEN 1 ELSE 0 END AS is_excluded,
-          e.id AS exclusion_id,
-          e.applied_by AS exclusion_applied_by,
-          e.applied_at AS exclusion_applied_at,
-          e.exclusion_comment AS exclusion_comment,
-          b.source_table
-        FROM base b
-        LEFT JOIN dispo_blocs_exclusions e
-          ON e.table_name = b.source_table
-         AND e.bloc_id = b.bloc_id
-         AND e.released_at IS NULL
-        WHERE b.date_debut < :end AND b.date_fin > :start
-        ORDER BY b.equipement_id, b.date_debut
-        """
-
-    df = execute_query(q, params)
-    df = _normalize_blocks_df(df)
-
-    if df.empty:
-        return {}
+    equipments = _all_equipment_options()
+    equipment_df = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_EQUIPMENT)
+    pdc_df = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_PDC)
 
     report: Dict[str, pd.DataFrame] = {}
+    empty_columns = [
+        "ID", "Site", "Équipement", "Début", "Fin", "Durée",
+        "Statut", "Cause Originale", "Cause Traduite", "Exclu", "Durée_Minutes",
+    ]
 
     for equip in equipments:
-        equip_data = df[df["equipement_id"] == equip]
+        if _is_pdc_equipment(equip):
+            source_df = pdc_df if pdc_df is not None else pd.DataFrame()
+        else:
+            source_df = equipment_df if equipment_df is not None else pd.DataFrame()
+
+        equip_data = source_df[source_df["equipement_id"] == equip].copy() if source_df is not None and not source_df.empty else pd.DataFrame()
 
         if equip_data.empty:
-            report[equip] = pd.DataFrame(columns=[
-                "ID", "Site", "Équipement", "Début", "Fin", "Durée",
-                "Statut", "Cause Originale", "Cause Traduite", "Exclu"
-            ])
+            report[equip] = pd.DataFrame(columns=empty_columns)
             continue
 
+        equip_data = equip_data.sort_values("date_debut")
         stats_raw = calculate_availability(equip_data, include_exclusions=False)
         stats_excl = calculate_availability(equip_data, include_exclusions=True)
 
-        report_data = []
-        report_data.append({
-            "ID": "RÉSUMÉ",
-            "Site": equip_data["site"].iloc[0] if not equip_data.empty else "N/A",
-            "Équipement": equip,
-            "Début": start_dt.strftime("%Y-%m-%d %H:%M"),
-            "Fin": end_dt.strftime("%Y-%m-%d %H:%M"),
-            "Durée": format_minutes(stats_raw["total_minutes"]),
-            "Durée_Minutes": stats_raw["total_minutes"],
-            "Statut": f"Disponibilité: {stats_raw['pct_available']:.2f}%",
-            "Cause Originale": f"Brute: {stats_raw['pct_available']:.2f}% | Avec exclusions: {stats_excl['pct_available']:.2f}%",
-            "Cause Traduite": f"Disponible: {format_minutes(stats_raw['available_minutes'])} | Indisponible: {format_minutes(stats_raw['unavailable_minutes'])}",
-            "Exclu": "N/A",
-        })
+        site_value = equip_data.get("site")
+        if isinstance(site_value, pd.Series) and not site_value.empty:
+            site_label = str(site_value.iloc[0])
+        else:
+            site_label = "N/A"
+
+        report_rows = [
+            {
+                "ID": "RÉSUMÉ",
+                "Site": site_label,
+                "Équipement": equip,
+                "Début": start_dt.strftime("%Y-%m-%d %H:%M"),
+                "Fin": end_dt.strftime("%Y-%m-%d %H:%M"),
+                "Durée": format_minutes(stats_raw["total_minutes"]),
+                "Durée_Minutes": stats_raw["total_minutes"],
+                "Statut": f"Disponibilité: {stats_raw['pct_available']:.2f}%",
+                "Cause Originale": f"Brute: {stats_raw['pct_available']:.2f}% | Avec exclusions: {stats_excl['pct_available']:.2f}%",
+                "Cause Traduite": f"Disponible: {format_minutes(stats_raw['available_minutes'])} | Indisponible: {format_minutes(stats_raw['unavailable_minutes'])}",
+                "Exclu": "N/A",
+            }
+        ]
 
         unavailable_blocks = equip_data[equip_data["est_disponible"] == 0].copy()
         for idx, (_, block) in enumerate(unavailable_blocks.iterrows(), 1):
             cause_originale = block.get("cause", "Non spécifié")
             cause_traduite = translate_cause_to_text(cause_originale, equip)
-            report_data.append({
+            start_value = pd.to_datetime(block["date_debut"]).strftime("%Y-%m-%d %H:%M")
+            end_value = pd.to_datetime(block["date_fin"]).strftime("%Y-%m-%d %H:%M")
+            duration_minutes = int(block.get("duration_minutes", 0) or 0)
+
+            report_rows.append({
                 "ID": f"IND-{idx:03d}",
-                "Site": block["site"],
+                "Site": block.get("site", site_label),
                 "Équipement": equip,
-                "Début": block["date_debut"].strftime("%Y-%m-%d %H:%M"),
-                "Fin": block["date_fin"].strftime("%Y-%m-%d %H:%M"),
-                "Durée": format_minutes(int(block["duration_minutes"])),
-                "Durée_Minutes": int(block["duration_minutes"]),
+                "Début": start_value,
+                "Fin": end_value,
+                "Durée": format_minutes(duration_minutes),
+                "Durée_Minutes": duration_minutes,
                 "Statut": "❌ Indisponible",
                 "Cause Originale": cause_originale,
                 "Cause Traduite": cause_traduite,
-                "Exclu": "✅ Oui" if block["is_excluded"] == 1 else "❌ Non",
+                "Exclu": "✅ Oui" if block.get("is_excluded", 0) == 1 else "❌ Non",
             })
 
         missing_blocks = equip_data[equip_data["est_disponible"] == -1].copy()
         for idx, (_, block) in enumerate(missing_blocks.iterrows(), 1):
-            report_data.append({
+            start_value = pd.to_datetime(block["date_debut"]).strftime("%Y-%m-%d %H:%M")
+            end_value = pd.to_datetime(block["date_fin"]).strftime("%Y-%m-%d %H:%M")
+            duration_minutes = int(block.get("duration_minutes", 0) or 0)
+
+            report_rows.append({
                 "ID": f"MISS-{idx:03d}",
-                "Site": block["site"],
+                "Site": block.get("site", site_label),
                 "Équipement": equip,
-                "Début": block["date_debut"].strftime("%Y-%m-%d %H:%M"),
-                "Fin": block["date_fin"].strftime("%Y-%m-%d %H:%M"),
-                "Durée": format_minutes(int(block["duration_minutes"])),
-                "Durée_Minutes": int(block["duration_minutes"]),
+                "Début": start_value,
+                "Fin": end_value,
+                "Durée": format_minutes(duration_minutes),
+                "Durée_Minutes": duration_minutes,
                 "Statut": "⚠️ Données manquantes",
                 "Cause Originale": "Données manquantes",
                 "Cause Traduite": "Aucune donnée disponible pour cette période",
-                "Exclu": "✅ Oui" if block["is_excluded"] == 1 else "❌ Non",
+                "Exclu": "✅ Oui" if block.get("is_excluded", 0) == 1 else "❌ Non",
             })
 
-        report[equip] = pd.DataFrame(report_data)
+        report[equip] = pd.DataFrame(report_rows)
 
     return report
 
@@ -3064,40 +3003,51 @@ def render_overview_tab(
 
     df_unavailability_filtered = df_unavailability_source
     selected_unavailability_equip: Optional[str] = None
-    available_equips: List[Any] = []
+    equipment_options = _all_equipment_options()
+    available_equips: Set[str] = set()
 
     if not df_unavailability_source.empty and "equipement_id" in df_unavailability_source.columns:
-        available_equips = [
-            value
+        available_equips = {
+            str(value).strip().upper()
             for value in df_unavailability_source["equipement_id"].dropna().unique().tolist()
             if str(value).strip()
+        }
+
+    previous_selection = st.session_state.get("overview_unavailability_equip_filter")
+    if previous_selection is not None and previous_selection not in equipment_options:
+        st.session_state["overview_unavailability_equip_filter"] = None
+        previous_selection = None
+
+    select_options: List[Optional[str]] = [None, *equipment_options]
+    default_index = 0
+    if previous_selection in equipment_options:
+        default_index = select_options.index(previous_selection)
+
+    def _format_overview_filter(value: Optional[str]) -> str:
+        if value is None:
+            return "Tous les équipements"
+        label = str(value)
+        if label.upper() not in available_equips:
+            return f"{label} (sans données)"
+        return label
+
+    selected_unavailability_equip = st.selectbox(
+        "Filtrer par équipement",
+        options=select_options,
+        index=default_index,
+        format_func=_format_overview_filter,
+        key="overview_unavailability_equip_filter",
+        help="Limite l'analyse aux indisponibilités de l'équipement sélectionné.",
+    )
+
+    if selected_unavailability_equip is not None:
+        equip_upper = selected_unavailability_equip.upper()
+        df_unavailability_filtered = df_unavailability_source[
+            df_unavailability_source["equipement_id"].astype(str).str.upper() == equip_upper
         ]
-
-        if available_equips:
-            available_equips = sorted(available_equips, key=lambda item: str(item))
-            previous_selection = st.session_state.get("overview_unavailability_equip_filter")
-            if previous_selection is not None and previous_selection not in available_equips:
-                st.session_state["overview_unavailability_equip_filter"] = None
-                previous_selection = None
-
-            default_index = 0
-            if previous_selection in available_equips:
-                default_index = available_equips.index(previous_selection) + 1
-
-            selected_unavailability_equip = st.selectbox(
-                "Filtrer par équipement",
-                options=[None, *available_equips],
-                index=default_index,
-                format_func=lambda value: "Tous les équipements" if value is None else str(value),
-                key="overview_unavailability_equip_filter",
-                help="Limite l'analyse aux indisponibilités de l'équipement sélectionné.",
-            )
-
-            if selected_unavailability_equip is not None:
-                df_unavailability_filtered = df_unavailability_source[
-                    df_unavailability_source["equipement_id"] == selected_unavailability_equip
-                ]
-                st.session_state["current_equip"] = selected_unavailability_equip
+        st.session_state["current_equip"] = selected_unavailability_equip
+    else:
+        st.session_state["current_equip"] = None
 
     if df_unavailability_source.empty:
         st.info("ℹ️ Aucune donnée disponible pour analyser les indisponibilités sur cette période.")
@@ -3462,23 +3412,36 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
         st.info("ℹ️ Veuillez sélectionner un site spécifique pour afficher la timeline détaillée.")
         return
 
-    equips = get_equipments(mode, site)
-    if not equips:
+    all_equips = _all_equipment_options()
+    available_equips = {
+        *(s.upper() for s in get_equipments(MODE_EQUIPMENT, site) or []),
+        *(s.upper() for s in get_equipments(MODE_PDC, site) or []),
+    }
+
+    if not available_equips:
         st.warning("⚠️ Aucun équipement disponible pour ce site.")
-        return
+
+    def _format_timeline_option(value: str) -> str:
+        label = str(value)
+        if label.upper() not in available_equips:
+            return f"{label} (sans données)"
+        return label
 
     selector_key = "timeline_equip_selector"
     current_equip = st.session_state.get("current_equip")
-    if selector_key in st.session_state and st.session_state[selector_key] not in equips:
+    if selector_key in st.session_state and st.session_state[selector_key] not in all_equips:
         del st.session_state[selector_key]
-    if current_equip not in equips:
-        current_equip = equips[0]
+    if current_equip not in all_equips:
+        current_equip = next(
+            (opt for opt in all_equips if opt.upper() in available_equips),
+            all_equips[0],
+        )
 
     equip = st.selectbox(
         "Équipement",
-        options=equips,
-        index=equips.index(current_equip) if current_equip in equips else 0,
-        format_func=lambda value: value,
+        options=all_equips,
+        index=all_equips.index(current_equip) if current_equip in all_equips else 0,
+        format_func=_format_timeline_option,
         key=selector_key,
         help="Sélectionnez l'équipement pour la timeline détaillée."
     )
@@ -3486,7 +3449,7 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
     st.session_state["current_equip"] = equip
 
     with st.spinner("Chargement de la timeline..."):
-        df = load_blocks(site, equip, start_dt, end_dt, mode=mode)
+        df = load_blocks(site, equip, start_dt, end_dt, mode=_mode_for_equipment(equip))
 
     if df.empty:
         st.warning("⚠️ Aucune donnée disponible pour cet équipement sur cette période.")
@@ -4994,19 +4957,11 @@ def _render_equipment_detail(detail: EquipmentReportDetail) -> None:
 
 def render_report_tab():
     """Affiche l'onglet rapport de disponibilité."""
-    mode = get_current_mode()
     st.header("📊 Rapport Exécutif de Disponibilité")
-
-    if mode == MODE_PDC:
-        st.markdown("""
-        **Rapport complet** pour présentation et analyse des performances des points de charge.
-        Cette vue regroupe toutes les métriques clés, analyses détaillées et recommandations spécifiques aux PDC.
-        """)
-    else:
-        st.markdown("""
-        **Rapport complet** pour présentation et analyse des performances des équipements AC, DC1, DC2.
-        Cette vue regroupe toutes les métriques clés, analyses détaillées et recommandations.
-        """)
+    st.markdown("""
+    **Rapport complet** pour présentation et analyse des performances AC, DC et PDC.
+    Cette vue regroupe toutes les métriques clés, analyses détaillées et recommandations pour chaque équipement.
+    """)
 
     site_current = st.session_state.get("current_site")
     start_dt_current = st.session_state.get("current_start_dt")
@@ -5021,15 +4976,15 @@ def render_report_tab():
         return
 
     with st.spinner("⏳ Génération du rapport exécutif..."):
-        report_data = generate_availability_report(start_dt_current, end_dt_current, site_current, mode=mode)
+        report_data = generate_availability_report(start_dt_current, end_dt_current, site_current, mode=get_current_mode())
 
     if not report_data:
         st.warning("⚠️ Aucune donnée disponible pour générer le rapport.")
         return
 
-    equipments = sorted(report_data.keys())
+    equipments = [equip for equip in _all_equipment_options() if equip in report_data]
     if not equipments:
-        equipments = get_equipments(mode, site_current)
+        equipments = list(report_data.keys())
     overview_df, equipment_details, totals = _prepare_report_summary(report_data, equipments)
 
     analysis_duration = end_dt_current - start_dt_current
@@ -5617,9 +5572,20 @@ def main():
         st.error("⚠️ Sélectionnez un site pour afficher la disponibilité.")
     else:
         with st.spinner("⏳ Chargement des données..."):
-            df_general = load_filtered_blocks(start_dt, end_dt, site, None, mode=get_current_mode())
+            equipment_blocks = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_EQUIPMENT)
+            pdc_blocks = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_PDC)
+
+            frames = [df for df in (equipment_blocks, pdc_blocks) if df is not None and not df.empty]
+            df_general = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
             if equip_selected:
-                df_equipment = load_filtered_blocks(start_dt, end_dt, site, equip, mode=get_current_mode())
+                df_equipment = load_filtered_blocks(
+                    start_dt,
+                    end_dt,
+                    site,
+                    equip,
+                    mode=_mode_for_equipment(equip),
+                )
 
         if not equip_selected:
             st.info("ℹ️ Utilisez les sélecteurs dédiés dans les sections d'analyse et de timeline pour cibler un équipement spécifique.")
