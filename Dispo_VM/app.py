@@ -5121,7 +5121,120 @@ def render_statistics_tab() -> None:
         if idx < len(selected_sites):
             st.divider()
 
-def main():
+
+def _render_statistics_pdf_export(
+    site: str,
+    site_label: str,
+    stats: Dict[str, Any],
+    start_dt: datetime,
+    end_dt: datetime,
+) -> None:
+    """Render the download button allowing users to export the statistics view as PDF."""
+
+    summary_df = stats.get("summary_df")
+    if not isinstance(summary_df, pd.DataFrame):
+        summary_df = pd.DataFrame(summary_df or {})
+
+    metrics = stats.get("metrics")
+    if not isinstance(metrics, dict):
+        metrics = {}
+
+    try:
+        equipment_summary = get_equipment_summary(
+            start_dt,
+            end_dt,
+            site=site,
+            mode=MODE_EQUIPMENT,
+        )
+    except Exception as exc:
+        logger.error(
+            "Erreur lors du chargement du résumé équipements pour %s : %s",
+            site,
+            exc,
+        )
+        equipment_summary = pd.DataFrame()
+
+    try:
+        pdc_summary = get_equipment_summary(
+            start_dt,
+            end_dt,
+            site=site,
+            mode=MODE_PDC,
+        )
+    except Exception as exc:
+        logger.error(
+            "Erreur lors du chargement du résumé PDC pour %s : %s",
+            site,
+            exc,
+        )
+        pdc_summary = pd.DataFrame()
+
+    raw_frames: List[pd.DataFrame] = []
+    for mode in (MODE_EQUIPMENT, MODE_PDC):
+        try:
+            frame = load_filtered_blocks(start_dt, end_dt, site, None, mode=mode)
+        except DatabaseError as exc:
+            logger.warning(
+                "Impossible de charger les blocs (%s) pour %s : %s",
+                mode,
+                site,
+                exc,
+            )
+            frame = pd.DataFrame()
+        except Exception as exc:  # pragma: no cover - sécurité supplémentaire
+            logger.error(
+                "Erreur inattendue lors du chargement des blocs (%s) pour %s : %s",
+                mode,
+                site,
+                exc,
+            )
+            frame = pd.DataFrame()
+
+        if frame is not None and not frame.empty:
+            raw_frames.append(frame)
+
+    raw_blocks = pd.concat(raw_frames, ignore_index=True) if raw_frames else pd.DataFrame()
+
+    report = SiteReport(
+        site=site,
+        site_label=site_label,
+        metrics=metrics,
+        summary_df=summary_df,
+        equipment_summary=equipment_summary,
+        raw_blocks=raw_blocks,
+        pdc_summary=pdc_summary,
+    )
+
+    title = f"Rapport statistique – {site_label}"
+
+    try:
+        pdf_bytes = generate_statistics_pdf([report], start_dt, end_dt, title=title)
+    except ValueError as exc:
+        st.info(f"ℹ️ {exc}")
+        return
+    except Exception as exc:
+        logger.error("Erreur lors de la génération du PDF pour %s : %s", site, exc)
+        st.error("❌ Impossible de générer le PDF pour cette sélection.")
+        return
+
+    start_ts = _ensure_paris_timestamp(start_dt) or pd.Timestamp(start_dt)
+    end_ts = _ensure_paris_timestamp(end_dt) or pd.Timestamp(end_dt)
+    start_label = start_ts.strftime("%Y%m%d")
+    end_label = end_ts.strftime("%Y%m%d")
+    filename = f"rapport_statistique_{site}_{start_label}_{end_label}.pdf"
+
+    st.download_button(
+        "Télécharger le PDF",
+        data=pdf_bytes,
+        file_name=filename,
+        mime="application/pdf",
+        key=f"download_pdf_{site}",
+        help="Exportez le rapport statistique complet pour le site sélectionné.",
+    )
+
+
+def main():
+    """Point d'entrée principal de l'application."""
     """Point d'entrée principal de l'application."""
 
     if "last_cache_clear" not in st.session_state:
