@@ -2,6 +2,7 @@
 import math
 import os
 import re
+import calendar
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from itertools import cycle
@@ -73,6 +74,11 @@ def set_current_mode(mode: str) -> None:
     if mode not in MODE_LABELS:
         mode = MODE_EQUIPMENT
     st.session_state["app_mode"] = mode
+
+
+def _reset_full_period_selection() -> None:
+    """Désactive la sélection de la période complète lorsque les filtres changent."""
+    st.session_state["use_full_period"] = False
 
 st.set_page_config(
     layout="wide",
@@ -2759,7 +2765,7 @@ def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
     current_mode = get_current_mode()
     st.subheader("🔍 Filtres de Recherche")
 
-    col1, col2, col3 = st.columns([1, 1, 2])
+    col1, col2, col_dates = st.columns([1, 1, 2])
     with col1:
         equipment_sites = set(get_sites(MODE_EQUIPMENT) or [])
         pdc_sites = set(get_sites(MODE_PDC) or [])
@@ -2837,40 +2843,79 @@ def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
 
         equip = selected_label
 
-    with col3:
+    with col_dates:
         today = datetime.now(timezone.utc).date()
-        c1, c2 = st.columns(2)
-        
-        default_start = st.session_state.get("filter_start_date", today - timedelta(days=30))
-        start_date = c1.date_input(
-            "Date de début",
-            value=default_start,
-            max_value=today,
-            key="filter_start_date",
-            help="Date de début de la période d'analyse"
+        years = list(range(today.year, today.year - 5, -1))
+
+        default_year = st.session_state.get("filter_report_year", today.year)
+        if default_year not in years:
+            default_year = today.year
+
+        month_abbr = list(calendar.month_abbr[1:])
+        default_month_str = st.session_state.get(
+            "filter_report_month_str",
+            month_abbr[today.month - 1],
         )
+        if default_month_str not in month_abbr:
+            default_month_str = month_abbr[today.month - 1]
 
-        default_end = st.session_state.get("filter_end_date", today)
-        if isinstance(default_end, datetime):
-            default_end = default_end.date()
-        if default_end < start_date:
-            default_end = start_date
+        default_year_index = years.index(default_year)
+        default_month_index = month_abbr.index(default_month_str)
 
-        end_date = c2.date_input(
-            "Date de fin",
-            value=default_end,
-            min_value=start_date,
-            max_value=today,
-            key="filter_end_date",
-            help="Date de fin de la période d'analyse"
-        )
+        with st.expander('Focus mois'):
+            report_year = st.selectbox(
+                "Année",
+                years,
+                index=default_year_index,
+                key="filter_report_year",
+                on_change=_reset_full_period_selection,
+            )
+            report_month_str = st.radio(
+                "Mois",
+                month_abbr,
+                index=default_month_index,
+                horizontal=True,
+                key="filter_report_month_str",
+                on_change=_reset_full_period_selection,
+            )
+            report_month = month_abbr.index(report_month_str) + 1
 
-        if end_date < start_date:
-            st.session_state["filter_end_date"] = start_date
-            end_date = start_date
-    
-    start_dt = datetime.combine(start_date, time.min)
-    end_dt = datetime.combine(end_date, time.max)
+        use_full_period = st.session_state.get("use_full_period", False)
+        full_period_start = datetime(2025, 1, 1).date()
+        if full_period_start > today:
+            full_period_start = today
+
+        if st.button(
+            "Sélectionner toute la période depuis le 01-01-2025",
+            key="filter_full_period_btn",
+            help="Analyse depuis le 1er janvier 2025 jusqu'à aujourd'hui.",
+        ):
+            use_full_period = True
+            st.session_state["use_full_period"] = True
+
+        if use_full_period:
+            start_date = full_period_start
+            end_date = today
+            st.text(
+                f"Période complète : {start_date.strftime('%Y-%m-%d')} ➜ {end_date.strftime('%Y-%m-%d')}"
+            )
+        else:
+            end_day = calendar.monthrange(report_year, report_month)[1]
+            start_date = datetime(report_year, report_month, 1).date()
+            end_date = datetime(report_year, report_month, end_day).date()
+            if end_date > today:
+                end_date = today
+            if start_date > end_date:
+                start_date = end_date
+            st.text(f"{report_year} {report_month_str}")
+            st.session_state["use_full_period"] = False
+
+        st.session_state["filter_start_date"] = start_date
+        st.session_state["filter_end_date"] = end_date
+        st.session_state["filter_report_month"] = report_month
+
+    start_dt = datetime.combine(st.session_state["filter_start_date"], time.min)
+    end_dt = datetime.combine(st.session_state["filter_end_date"], time.max)
 
     return site, equip, start_dt, end_dt
 
@@ -5255,24 +5300,10 @@ def render_statistics_tab() -> None:
     st.header("📊 Timeline - Exclusions/annotations rapides")
     st.caption("Analyse les indisponibilités critiques AC, DC et PDC en excluant les pertes de données.")
 
-    available_sites = get_sites(MODE_EQUIPMENT)
-    if not available_sites:
-        st.warning("Aucun site disponible pour l'analyse statistique.")
-        return
-
     current_site = st.session_state.get("current_site")
-    if current_site and current_site in available_sites:
-        default_sites = [current_site]
-    else:
-        default_sites = available_sites[:1]
-
-    selected_sites = st.multiselect(
-        "Sites à analyser",
-        options=available_sites,
-        default=default_sites,
-        format_func=lambda code: mapping_sites.get(code.split("_")[-1], code),
-        help="Sélectionnez un ou plusieurs sites pour visualiser leurs statistiques détaillées."
-    )
+    if not current_site:
+        st.info("Sélectionnez un site via les filtres globaux pour afficher la timeline des exclusions.")
+        return
 
     session_start = st.session_state.get("current_start_dt")
     session_end = st.session_state.get("current_end_dt")
@@ -5282,28 +5313,12 @@ def render_statistics_tab() -> None:
     if not isinstance(session_end, datetime):
         session_end = datetime.now()
 
-    col_start, col_end = st.columns(2)
-    start_date = col_start.date_input(
-        "Date de début",
-        value=session_start.date(),
-        max_value=session_end.date(),
-        help="Date de début de la fenêtre d'analyse statistique."
-    )
-    end_date = col_end.date_input(
-        "Date de fin",
-        value=session_end.date(),
-        min_value=start_date,
-        help="Date de fin de la fenêtre d'analyse statistique."
-    )
+    start_dt = datetime.combine(session_start.date(), time.min)
+    end_dt = datetime.combine(session_end.date(), time.max)
 
-    start_dt = datetime.combine(start_date, time.min)
-    end_dt = datetime.combine(end_date, time.max)
+    st.caption("Les métriques sont calculées sur la période définie dans les filtres globaux.")
 
-    st.caption("Les métriques calculées considèrent la station indisponible dès qu'une condition critique est vraie.")
-
-    if not selected_sites:
-        st.info("Sélectionnez au moins un site pour afficher la vue statistique.")
-        return
+    selected_sites = [current_site]
 
     for idx, site in enumerate(selected_sites, start=1):
         site_label = mapping_sites.get(site.split("_")[-1], site)
