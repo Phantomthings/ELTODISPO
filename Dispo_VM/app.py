@@ -1,6 +1,7 @@
 #app.py
 import math
 import os
+import calendar
 import re
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
@@ -15,10 +16,8 @@ import streamlit as st
 from sqlalchemy import create_engine, text, inspect, bindparam
 from sqlalchemy.exc import NoSuchTableError, SQLAlchemyError
 
-
 class ExclusionError(RuntimeError):
     """Raised when an exclusion operation cannot be completed."""
-
 
 @dataclass
 class ExclusionActionResult:
@@ -31,7 +30,6 @@ class ExclusionActionResult:
     new_status: int
     changed_by: Optional[str]
     comment: Optional[str]
-
 
 _TABLE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 from Projects import mapping_sites
@@ -68,11 +66,13 @@ def _format_timestamp_display(value: Any) -> str:
 def get_current_mode() -> str:
     return st.session_state.get("app_mode", MODE_EQUIPMENT)
 
-
 def set_current_mode(mode: str) -> None:
     if mode not in MODE_LABELS:
         mode = MODE_EQUIPMENT
     st.session_state["app_mode"] = mode
+def _reset_full_period_selection() -> None:
+    """Réinitialise la sélection de période complète."""
+    st.session_state["use_full_period"] = False
 
 st.set_page_config(
     layout="wide",
@@ -204,7 +204,6 @@ def execute_write(query: str, params: Optional[Dict] = None) -> bool:
         st.error(f"❌ Erreur inattendue: {str(e)}")
         return False
 
-
 def _ensure_reclassification_history_table(conn) -> None:
     """Create the history table if it does not already exist."""
 
@@ -244,7 +243,6 @@ def _ensure_reclassification_history_table(conn) -> None:
 
     conn.execute(create_stmt)
 
-
 def _fetch_block_status(conn, table_name: str, block_id: int) -> int:
     """Return the current est_disponible value for the block."""
 
@@ -269,14 +267,12 @@ def _fetch_block_status(conn, table_name: str, block_id: int) -> int:
             f"Valeur 'est_disponible' invalide pour le bloc {block_id}."
         ) from exc
 
-
 _STATUS_COLUMN_CACHE: Dict[str, str] = {}
 _TABLE_COLUMNS_CACHE: Dict[str, Set[str]] = {}
 _STATUS_COLUMN_CANDIDATES: Tuple[str, ...] = ("est_disponible", "etat")
 _TIME_COLUMNS_CACHE: Dict[str, Tuple[Optional[str], Optional[str]]] = {}
 _TIME_START_CANDIDATES: Tuple[str, ...] = ("date_debut", "start_time", "start", "debut")
 _TIME_END_CANDIDATES: Tuple[str, ...] = ("date_fin", "end_time", "finish", "fin")
-
 
 def _get_table_columns(conn, table_name: str) -> Set[str]:
     if table_name in _TABLE_COLUMNS_CACHE:
@@ -297,7 +293,6 @@ def _get_table_columns(conn, table_name: str) -> Set[str]:
     _TABLE_COLUMNS_CACHE[table_name] = columns
     return columns
 
-
 def _resolve_status_column(conn, table_name: str) -> str:
     """Return the name of the status column for the given table."""
 
@@ -315,7 +310,6 @@ def _resolve_status_column(conn, table_name: str) -> str:
         f"La table {table_name} ne contient aucune colonne de statut reconnue ({', '.join(_STATUS_COLUMN_CANDIDATES)})."
     )
 
-
 def _resolve_time_columns(conn, table_name: str) -> Tuple[Optional[str], Optional[str]]:
     if table_name in _TIME_COLUMNS_CACHE:
         return _TIME_COLUMNS_CACHE[table_name]
@@ -329,7 +323,6 @@ def _resolve_time_columns(conn, table_name: str) -> Tuple[Optional[str], Optiona
 
 def _is_valid_table_name(table_name: str) -> bool:
     return bool(_TABLE_NAME_PATTERN.match(table_name))
-
 
 def _ensure_exclusion_table(conn) -> None:
     dialect = conn.dialect.name
@@ -371,7 +364,6 @@ def _ensure_exclusion_table(conn) -> None:
         )
     conn.execute(create_stmt)
 
-
 def _get_active_exclusion(conn, table_name: str, block_id: int) -> Optional[Dict[str, Any]]:
     stmt = text(
         """
@@ -385,7 +377,6 @@ def _get_active_exclusion(conn, table_name: str, block_id: int) -> Optional[Dict
     )
     row = conn.execute(stmt, {"table_name": table_name, "block_id": block_id}).mappings().first()
     return dict(row) if row else None
-
 
 def apply_block_exclusion(
     table_name: str,
@@ -493,7 +484,6 @@ def apply_block_exclusion(
         comment=comment,
     )
 
-
 def release_block_exclusion(
     table_name: str,
     block_id: int,
@@ -593,13 +583,11 @@ def release_block_exclusion(
         comment=comment,
     )
 
-
 def delete_annotation(annotation_id: int) -> bool:
     """Supprime définitivement une annotation identifiée par son ID."""
     query = "DELETE FROM dispo_annotations WHERE id = :id"
     params = {"id": annotation_id}
     return execute_write(query, params)
-
 
 def render_inline_delete_table(
     df: pd.DataFrame,
@@ -659,7 +647,6 @@ def render_inline_delete_table(
                 else:
                     st.error(error_message.format(**message_context))
 
-
 def invalidate_cache():
     """Invalide le cache de données."""
     st.cache_data.clear()
@@ -695,7 +682,6 @@ def _list_ac_tables() -> pd.DataFrame:
     out = df["table_name"].apply(_parse)
     out.columns = ["site_code", "table_name"]
     return out.dropna(subset=["site_code"]).reset_index(drop=True)
-
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _list_pdc_tables() -> pd.DataFrame:
@@ -746,7 +732,6 @@ def _sanitize_scope_options(options: List[str]) -> List[str]:
         cleaned.append(text)
     return cleaned
 
-
 def get_sites(mode: str = MODE_EQUIPMENT) -> List[str]:
     """Récupère la liste des sites en fonction du mode sélectionné."""
     if mode == MODE_PDC:
@@ -770,7 +755,6 @@ def get_sites(mode: str = MODE_EQUIPMENT) -> List[str]:
     ac_sites = set(ac["site_code"].tolist()) if not ac.empty else set()
     bt_sites = set(bt["site_code"].tolist()) if not bt.empty else set()
     return sorted(_sanitize_scope_options(list(ac_sites.union(bt_sites))))
-
 
 def get_equipments(mode: str = MODE_EQUIPMENT, site: Optional[str] = None) -> List[str]:
     if mode == MODE_PDC:
@@ -804,6 +788,27 @@ def get_equipments(mode: str = MODE_EQUIPMENT, site: Optional[str] = None) -> Li
 
     return sorted(_sanitize_scope_options(list(equips)))
 
+def get_all_sites() -> List[str]:
+    """Retourne la liste fusionnée des sites AC/DC et PDC."""
+    combined: Set[str] = set()
+    for scope in (get_sites(MODE_EQUIPMENT), get_sites(MODE_PDC)):
+        if not scope:
+            continue
+        combined.update(scope)
+    return sorted(combined)
+
+def get_all_equipments(site: Optional[str] = None) -> List[str]:
+    """Retourne la liste fusionnée des équipements AC/DC et PDC pour un site."""
+    combined: Set[str] = set()
+    scopes = (
+        get_equipments(MODE_EQUIPMENT, site),
+        get_equipments(MODE_PDC, site),
+    )
+    for equipments in scopes:
+        if not equipments:
+            continue
+        combined.update(equipments)
+    return sorted(combined)
 
 def _load_blocks_equipment(site: str, equip: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
     params = {"site": site, "equip": equip, "start": start_dt, "end": end_dt}
@@ -870,7 +875,6 @@ def _load_blocks_equipment(site: str, equip: str, start_dt: datetime, end_dt: da
     df = execute_query(q, params)
     return _normalize_blocks_df(df)
 
-
 def _load_blocks_pdc(site: str, equip: str, start_dt: datetime, end_dt: datetime) -> pd.DataFrame:
     params = {"site": site, "equip": equip, "start": start_dt, "end": end_dt}
     union_sql = _pdc_union_sql_for_site(site)
@@ -912,7 +916,6 @@ def _load_blocks_pdc(site: str, equip: str, start_dt: datetime, end_dt: datetime
 
     df = execute_query(q, params)
     return _normalize_blocks_df(df)
-
 
 def load_blocks(site: str, equip: str, start_dt: datetime, end_dt: datetime, mode: Optional[str] = None) -> pd.DataFrame:
     active_mode = mode or get_current_mode()
@@ -996,7 +999,6 @@ def _load_filtered_blocks_equipment(start_dt: datetime, end_dt: datetime, site: 
     normalized = _normalize_blocks_df(df)
     return _clip_block_durations(normalized, start_dt, end_dt)
 
-
 def _load_filtered_blocks_pdc(start_dt: datetime, end_dt: datetime, site: Optional[str] = None, equip: Optional[str] = None) -> pd.DataFrame:
     params = {"start": start_dt, "end": end_dt}
     if site:
@@ -1052,13 +1054,11 @@ def _load_filtered_blocks_pdc(start_dt: datetime, end_dt: datetime, site: Option
     normalized = _normalize_blocks_df(df)
     return _clip_block_durations(normalized, start_dt, end_dt)
 
-
 def load_filtered_blocks(start_dt: datetime, end_dt: datetime, site: Optional[str] = None, equip: Optional[str] = None, mode: Optional[str] = None) -> pd.DataFrame:
     active_mode = mode or get_current_mode()
     if active_mode == MODE_PDC:
         return _load_filtered_blocks_pdc(start_dt, end_dt, site, equip)
     return _load_filtered_blocks_equipment(start_dt, end_dt, site, equip)
-
 
 def _bulk_exclude_missing_blocks(
     *,
@@ -1155,7 +1155,6 @@ def _insert_annotation(
         "user": user
     }
     return execute_write(query, params)
-
 
 def create_annotation(
     site: str,
@@ -1408,7 +1407,6 @@ def _batt_union_sql_all_sites() -> str:
     """ for tbl in df["table_name"].tolist()]
     return " UNION ALL ".join(parts)
 
-
 @st.cache_data(ttl=1800, show_spinner=False)
 def _pdc_union_sql_for_site(site: str) -> str:
     df = _list_pdc_tables()
@@ -1558,7 +1556,6 @@ def _normalize_blocks_df(df: pd.DataFrame) -> pd.DataFrame:
             out[text_col] = out[text_col].fillna("").astype(str)
     return out.sort_values("date_debut").reset_index(drop=True)
 
-
 def _clip_block_durations(
     df: pd.DataFrame,
     start_dt: datetime,
@@ -1587,7 +1584,6 @@ def _clip_block_durations(
     clipped["duration_minutes"] = duration.round().astype(int)
 
     return clipped
-
 
 def _aggregate_monthly_availability(
     df: pd.DataFrame,
@@ -1692,7 +1688,6 @@ def get_annotations(annotation_type: Optional[str] = None, limit: int = 200) -> 
         st.error(f"Erreur lors du chargement des annotations: {e}")
         return pd.DataFrame()
 
-
 @st.cache_data(ttl=300, show_spinner=False)
 def get_block_exclusions(active_only: bool = True, limit: int = 200) -> pd.DataFrame:
     """Récupère les exclusions enregistrées directement sur les blocs."""
@@ -1716,7 +1711,6 @@ def get_block_exclusions(active_only: bool = True, limit: int = 200) -> pd.DataF
     except DatabaseError as exc:
         st.error(f"Erreur lors du chargement des exclusions: {exc}")
         return pd.DataFrame()
-
 
 def _fetch_blocks_metadata(df_pairs: pd.DataFrame) -> Dict[Tuple[str, int], Dict[str, Any]]:
     metadata: Dict[Tuple[str, int], Dict[str, Any]] = {}
@@ -1852,7 +1846,6 @@ def _station_equipment_modes() -> List[Tuple[str, str]]:
     equipments.extend([(f"PDC{i}", MODE_PDC) for i in range(1, 7)])
     return equipments
 
-
 def _ensure_paris_timestamp(value: Any) -> Optional[pd.Timestamp]:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return None
@@ -1875,7 +1868,6 @@ def _ensure_paris_timestamp(value: Any) -> Optional[pd.Timestamp]:
     if pd.isna(ts):
         return None
     return ts
-
 
 def _build_station_timeline_df(timelines: Dict[str, pd.DataFrame]) -> pd.DataFrame:
     records: List[Dict[str, Any]] = []
@@ -1914,7 +1906,6 @@ def _build_station_timeline_df(timelines: Dict[str, pd.DataFrame]) -> pd.DataFra
     timeline_df.loc[mask_excl, "label"] = timeline_df.loc[mask_excl, "state"] + " (Exclu)"
     return timeline_df.sort_values(["Equipement", "start"]).reset_index(drop=True)
 
-
 def _new_condition_tracker(label: str) -> Dict[str, Any]:
     return {
         "label": label,
@@ -1925,7 +1916,6 @@ def _new_condition_tracker(label: str) -> Dict[str, Any]:
         "current_start": None,
         "denom": 0.0,
     }
-
 
 def _update_condition_tracker(
     tracker: Dict[str, Any],
@@ -1957,14 +1947,12 @@ def _update_condition_tracker(
             tracker["active"] = False
             tracker["current_start"] = None
 
-
 def _finalize_condition_tracker(tracker: Dict[str, Any], end_ts: pd.Timestamp) -> None:
     if tracker["active"] and tracker["current_start"] is not None:
         tracker["intervals"].append((tracker["current_start"], end_ts))
         tracker["occurrences"] += 1
         tracker["active"] = False
         tracker["current_start"] = None
-
 
 def _format_interval_summary(intervals: List[Tuple[pd.Timestamp, pd.Timestamp]], limit: int = 3) -> str:
     if not intervals:
@@ -1976,7 +1964,6 @@ def _format_interval_summary(intervals: List[Tuple[pd.Timestamp, pd.Timestamp]],
     if len(intervals) > limit:
         formatted.append(f"+{len(intervals) - limit} autres")
     return "\n".join(formatted)
-
 
 def _build_interval_table(intervals: List[Tuple[pd.Timestamp, pd.Timestamp]]) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
@@ -1991,7 +1978,6 @@ def _build_interval_table(intervals: List[Tuple[pd.Timestamp, pd.Timestamp]]) ->
             }
         )
     return pd.DataFrame(rows)
-
 
 def _analyze_station_conditions(
     timelines: Dict[str, pd.DataFrame],
@@ -2198,7 +2184,6 @@ def _analyze_station_conditions(
         "downtime_intervals": station_tracker["intervals"],
     }
 
-
 @st.cache_data(ttl=900, show_spinner=False)
 def load_station_statistics(site: str, start_dt: datetime, end_dt: datetime) -> Dict[str, Any]:
     timelines: Dict[str, pd.DataFrame] = {}
@@ -2214,7 +2199,6 @@ def load_station_statistics(site: str, start_dt: datetime, end_dt: datetime) -> 
     analysis = _analyze_station_conditions(timelines, start_dt, end_dt)
     analysis["timeline_df"] = _build_station_timeline_df(timelines)
     return analysis
-
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _calculate_monthly_availability_equipment(
@@ -2234,8 +2218,6 @@ def _calculate_monthly_availability_equipment(
 
     return _aggregate_monthly_availability(df, start_dt, end_dt)
 
-
-
 @st.cache_data(ttl=1800, show_spinner=False)
 def _calculate_monthly_availability_pdc(
     site: Optional[str] = None,
@@ -2253,8 +2235,6 @@ def _calculate_monthly_availability_pdc(
         return df
 
     return _aggregate_monthly_availability(df, start_dt, end_dt)
-
-
 
 def calculate_monthly_availability(
     site: Optional[str] = None,
@@ -2313,7 +2293,6 @@ def translate_cause_to_text(cause: str, equipement_id: str) -> str:
                 if pc_val is None and len(numbers) >= 2:
                     pc_val = int(numbers[1])
 
-        
         if ic_val is not None or pc_val is not None:
             cfg = get_equip_config(equipement_id)
             translated = translate_ic_pc(ic_val, pc_val, cfg["ic_map"], cfg["pc_map"])
@@ -2745,2062 +2724,1780 @@ def format_minutes(total_minutes: int) -> str:
     return ", ".join(parts)
 
 def render_header():
+
     """Affiche l'en-tête de l'application."""
-    col1, col2, col3 = st.columns([3, 2, 1])
+
+    col1, col2 = st.columns([4, 1])
+
     with col1:
+
         st.title("📊 Tableau de Bord - Disponibilité des Équipements")
+
         st.caption("Analyse et suivi de la disponibilité opérationnelle")
+
     with col2:
-        options = [MODE_EQUIPMENT, MODE_PDC]
-        current_mode = get_current_mode()
-        index = options.index(current_mode) if current_mode in options else 0
-        selected_mode = st.radio(
-            "Mode d'analyse",
-            options=options,
-            index=index,
-            horizontal=True,
-            format_func=lambda k: MODE_LABELS.get(k, k),
-            help="Basculer entre la disponibilité des équipements et celle des points de charge",
-        )
-        if selected_mode != current_mode:
-            set_current_mode(selected_mode)
-    with col3:
+
         if st.button("🔄 Actualiser", use_container_width=True):
+
             invalidate_cache()
+
             st.rerun()
-def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
+
+def render_filters() -> Tuple[Optional[str], datetime, datetime]:
+
     """Affiche les filtres et retourne les valeurs sélectionnées."""
-    mode = get_current_mode()
+
     st.subheader("🔍 Filtres de Recherche")
 
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1:
-        site_codes = get_sites(mode) or []
-        if not site_codes:
-            st.warning("Aucun site disponible.")
-            return None, None, datetime.min, datetime.min  
-        selected_site = st.selectbox(
-            "Site",
-            options=site_codes,               
-            index=0,
-            format_func=lambda code: mapping_sites.get(code.split("_")[-1], code),
-            help="Sélectionnez un site"
-        )
-        site = selected_site
 
-    with col2:
-        equips = get_equipments(mode, site) if site else get_equipments(mode)
-        equips = equips or []
-        if not equips:
-            st.warning("Aucun équipement pour ce site.")
-            return site, None, datetime.min, datetime.min  
 
-        selected_equip = st.selectbox(
-            "Équipement",
-            options=equips,                    
-            index=0,
-            format_func=lambda value: value,
-            help="Sélectionnez un équipement"
-        )
-        equip = selected_equip
+    site_codes = get_all_sites() or []
 
-    with col3:
+    if not site_codes:
+
+        st.warning("Aucun site disponible.")
+
+        return None, datetime.min, datetime.min
+
+
+
+    default_site = st.session_state.get("filter_site")
+
+    try:
+
+        default_index = site_codes.index(default_site) if default_site else 0
+
+    except ValueError:
+
+        default_index = 0
+
+
+
+    site = st.selectbox(
+
+        "Site",
+
+        options=site_codes,
+
+        index=default_index,
+
+        format_func=lambda code: mapping_sites.get(code.split("_")[-1], code),
+
+        key="filter_site",
+
+        help="Sélectionnez un site",
+
+    )
+
+
+
+    col_dates = st.container()
+
+    with col_dates:
+
         today = datetime.now(timezone.utc).date()
-        c1, c2 = st.columns(2)
-        
-        default_start = st.session_state.get("filter_start_date", today - timedelta(days=30))
-        start_date = c1.date_input(
-            "Date de début",
-            value=default_start,
-            max_value=today,
-            key="filter_start_date",
-            help="Date de début de la période d'analyse"
+
+        years = list(range(today.year, today.year - 5, -1))
+
+
+
+        default_year = st.session_state.get("filter_report_year", today.year)
+
+        if default_year not in years:
+
+            default_year = today.year
+
+
+
+        month_abbr = list(calendar.month_abbr[1:])
+
+        default_month_str = st.session_state.get(
+
+            "filter_report_month_str",
+
+            month_abbr[today.month - 1],
+
         )
 
-        default_end = st.session_state.get("filter_end_date", today)
-        if isinstance(default_end, datetime):
-            default_end = default_end.date()
-        if default_end < start_date:
-            default_end = start_date
+        if default_month_str not in month_abbr:
 
-        end_date = c2.date_input(
-            "Date de fin",
-            value=default_end,
-            min_value=start_date,
-            max_value=today,
-            key="filter_end_date",
-            help="Date de fin de la période d'analyse"
-        )
+            default_month_str = month_abbr[today.month - 1]
 
-        if end_date < start_date:
-            st.session_state["filter_end_date"] = start_date
-            end_date = start_date
-    
-    start_dt = datetime.combine(start_date, time.min)
-    end_dt = datetime.combine(end_date, time.max)
 
-    return site, equip, start_dt, end_dt
 
-def render_overview_tab(df: Optional[pd.DataFrame]):
-    """Affiche l'onglet vue d'ensemble."""
-    mode = get_current_mode()
+        default_year_index = years.index(default_year)
+
+        default_month_index = month_abbr.index(default_month_str)
+
+
+
+        with st.expander('Focus mois'):
+
+            report_year = st.selectbox(
+
+                "Année",
+
+                years,
+
+                index=default_year_index,
+
+                key="filter_report_year",
+
+                on_change=_reset_full_period_selection,
+
+            )
+
+            report_month_str = st.radio(
+
+                "Mois",
+
+                month_abbr,
+
+                index=default_month_index,
+
+                horizontal=True,
+
+                key="filter_report_month_str",
+
+                on_change=_reset_full_period_selection,
+
+            )
+
+            report_month = month_abbr.index(report_month_str) + 1
+
+
+
+        use_full_period = st.session_state.get("use_full_period", False)
+
+        full_period_start = datetime(2025, 1, 1).date()
+
+        if full_period_start > today:
+
+            full_period_start = today
+
+
+
+        if st.button(
+
+            "Sélectionner toute la période depuis le 01-01-2025",
+
+            key="filter_full_period_btn",
+
+            help="Analyse depuis le 1er janvier 2025 jusqu'à aujourd'hui.",
+
+        ):
+
+            use_full_period = True
+
+            st.session_state["use_full_period"] = True
+
+
+
+        if use_full_period:
+
+            start_date = full_period_start
+
+            end_date = today
+
+            st.text(
+
+                f"Période complète : {start_date.strftime('%Y-%m-%d')} ➜ {end_date.strftime('%Y-%m-%d')}"
+
+            )
+
+        else:
+
+            end_day = calendar.monthrange(report_year, report_month)[1]
+
+            start_date = datetime(report_year, report_month, 1).date()
+
+            end_date = datetime(report_year, report_month, end_day).date()
+
+            if end_date > today:
+
+                end_date = today
+
+            if start_date > end_date:
+
+                start_date = end_date
+
+            st.text(f"{report_year} {report_month_str}")
+
+            st.session_state["use_full_period"] = False
+
+
+
+        st.session_state["filter_start_date"] = start_date
+
+        st.session_state["filter_end_date"] = end_date
+
+    st.session_state["filter_report_month"] = report_month
+
+
+
+    start_dt = datetime.combine(st.session_state["filter_start_date"], time.min)
+
+    end_dt = datetime.combine(st.session_state["filter_end_date"], time.max)
+
+
+
+    return site, start_dt, end_dt
+
+
+
+def render_overview_tab(site: Optional[str], start_dt: datetime, end_dt: datetime) -> None:
+
+    """Affiche la vue d'ensemble du site sélectionné."""
+
     st.header("📈 Vue d'Ensemble")
 
-    site_scope = st.session_state.get("current_site")
-    equip_scope = st.session_state.get("current_equip")
-    context_parts = []
-    if site_scope is None:
-        context_parts.append("tous les sites")
-    if equip_scope is None:
-        if mode == MODE_PDC:
-            context_parts.append("l'ensemble des points de charge")
-        else:
-            context_parts.append("l'ensemble des équipements")
-    if context_parts:
-        st.info("Vue générale : " + " et ".join(context_parts) + ".")
 
-    if df is None or df.empty:
-        st.warning("⚠️ Aucune donnée disponible pour les critères sélectionnés.")
-        st.info("💡 Conseil: Essayez d'élargir la période ou de modifier les filtres.")
+
+    if not site:
+
+        st.info("ℹ️ Sélectionnez un site pour afficher la synthèse.")
+
         return
 
-    stats_raw = calculate_availability(df, include_exclusions=False)
-    stats_excl = calculate_availability(df, include_exclusions=True)
 
-    st.subheader("📊 Indicateurs Clés")
+
+    st.caption(
+
+        f"Période analysée : {start_dt.strftime('%Y-%m-%d')} ➜ {end_dt.strftime('%Y-%m-%d')}"
+
+    )
+
+
+
+    with st.spinner(f"Chargement des données pour {site}..."):
+
+        df_equipment = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_EQUIPMENT)
+
+        df_pdc = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_PDC)
+
+
+
+    if df_equipment is None:
+
+        df_equipment = pd.DataFrame()
+
+    if df_pdc is None:
+
+        df_pdc = pd.DataFrame()
+
+
+
+    if df_equipment.empty and df_pdc.empty:
+
+        st.warning("⚠️ Aucune donnée disponible pour ce site sur la période sélectionnée.")
+
+        return
+
+
+
+    frames = [df for df in (df_equipment, df_pdc) if not df.empty]
+
+    df_all = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
+
+    st.subheader("📊 Indicateurs Clés du site")
+
+    stats_raw = calculate_availability(df_all, include_exclusions=False)
+
+    stats_excl = calculate_availability(df_all, include_exclusions=True)
+
+
+
     col1, col2, col3, col4 = st.columns(4)
 
+
+
     with col1:
+
         st.metric(
+
             "Disponibilité brute",
+
             f"{stats_raw['pct_available']:.2f}%",
-            help="Valeur correspondant au calcul standard"
+
+            help="Disponibilité calculée sans tenir compte des exclusions",
+
         )
+
+
 
     with col2:
+
         st.metric(
+
             "Disponibilité avec exclusions",
+
             f"{stats_excl['pct_available']:.2f}%",
+
             delta=f"{stats_excl['pct_available'] - stats_raw['pct_available']:.2f}%",
-            help="Différence par rapport au calcul brut"
+
+            help="Impact des exclusions sur la disponibilité du site",
+
         )
 
+
+
     with col3:
+
         analyzed_minutes = stats_excl['effective_minutes']
+
         analyzed_delta = analyzed_minutes - stats_raw['effective_minutes']
+
         if analyzed_delta:
+
             delta_prefix = "+" if analyzed_delta > 0 else "-"
+
             delta_value = f"{delta_prefix} {format_minutes(abs(analyzed_delta))}"
+
         else:
+
             delta_value = None
 
         st.metric(
+
             "Temps analysé",
+
             format_minutes(analyzed_minutes),
+
             delta=delta_value,
+
             help=(
-                "Temps total disposant de données après application des exclusions "
+
+                "Temps total analysé après exclusions "
+
                 f"(données manquantes initiales : {format_minutes(stats_raw['missing_minutes'])})."
-            )
+
+            ),
+
         )
+
+
 
     with col4:
+
         st.metric(
-            "Temps Indisponible (avec exclusions)",
+
+            "Temps indisponible (avec exclusions)",
+
             format_minutes(stats_excl['unavailable_minutes']),
+
             delta=f"{stats_excl['unavailable_minutes'] - stats_raw['unavailable_minutes']} min",
-            delta_color="inverse", 
-            help="Temps total d'indisponibilité après application des exclusions"
+
+            delta_color="inverse",
+
+            help="Temps total d'indisponibilité après application des exclusions",
+
         )
+
+
+
     st.divider()
-    
-    st.subheader("📋 Tableau Récapitulatif des Équipements")
-    
-    site_current = st.session_state.get("current_site")
-    start_dt_current = st.session_state.get("current_start_dt")
-    end_dt_current = st.session_state.get("current_end_dt")
-    
-    if start_dt_current and end_dt_current:
-        df_summary = get_equipment_summary(start_dt_current, end_dt_current, site_current, mode=mode)
-        
-        if not df_summary.empty:
-            # Afficher le tableau avec un style amélioré
-            st.dataframe(
-                df_summary,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Équipement": st.column_config.TextColumn("Équipement", width="medium"),
-                    "Disponibilité Brute (%)": st.column_config.NumberColumn(
-                        "Disponibilité Brute (%)",
-                        width="medium",
-                        format="%.2f%%"
-                    ),
-                    "Disponibilité Avec Exclusions (%)": st.column_config.NumberColumn(
-                        "Disponibilité Avec Exclusions (%)",
-                        width="medium",
-                        format="%.2f%%"
-                    ),
-                    "Durée Totale": st.column_config.TextColumn("Durée Totale", width="medium"),
-                    "Temps Disponible": st.column_config.TextColumn("Temps Disponible", width="medium"),
-                    "Temps Indisponible": st.column_config.TextColumn("Temps Indisponible", width="medium"),
-                    "Jours avec des données": st.column_config.NumberColumn(
-                        "Jours avec des données",
-                        width="small"
-                    )
-                }
-            )
-            
-            # Ajouter des métriques visuelles pour chaque équipement
-            col1, col2, col3 = st.columns(3)
-            column_cycle = cycle([col1, col2, col3])
 
-            for _, row in df_summary.iterrows():
-                with next(column_cycle):
-                    equip = row["Équipement"]
-                    pct_brut = row["Disponibilité Brute (%)"]
-                    pct_excl = row["Disponibilité Avec Exclusions (%)"]
 
-                    # Couleur selon la disponibilité
-                    if pct_brut >= 95:
-                        color = "normal"
-                    elif pct_brut >= 90:
-                        color = "off"
-                    else:
-                        color = "inverse"
-                    
-                    st.metric(
-                        f"{equip} - Disponibilité",
-                        f"{pct_brut:.2f}%",
-                        delta=f"{pct_excl - pct_brut:.2f}%",
-                        delta_color=color,
-                        help=f"Brute: {pct_brut:.2f}% | Avec exclusions: {pct_excl:.2f}%"
-                    )
-        else:
-            st.info("ℹ️ Aucune donnée disponible pour le tableau récapitulatif.")
+
+    st.subheader("📋 Tableau récapitulatif AC/DC")
+
+    summary_equipment = get_equipment_summary(start_dt, end_dt, site, mode=MODE_EQUIPMENT)
+
+    if summary_equipment.empty:
+
+        st.info("ℹ️ Aucune donnée consolidée disponible pour les équipements AC/DC.")
+
     else:
-        st.warning("⚠️ Impossible de générer le tableau récapitulatif sans période définie.")
-    
+
+        st.dataframe(
+
+            summary_equipment,
+
+            hide_index=True,
+
+            use_container_width=True,
+
+            column_config={
+
+                "Équipement": st.column_config.TextColumn("Équipement", width="medium"),
+
+                "Disponibilité Brute (%)": st.column_config.NumberColumn(
+
+                    "Disponibilité Brute (%)",
+
+                    width="medium",
+
+                    format="%.2f%%",
+
+                ),
+
+                "Disponibilité Avec Exclusions (%)": st.column_config.NumberColumn(
+
+                    "Disponibilité Avec Exclusions (%)",
+
+                    width="medium",
+
+                    format="%.2f%%",
+
+                ),
+
+                "Durée Totale": st.column_config.TextColumn("Durée Totale", width="medium"),
+
+                "Temps Disponible": st.column_config.TextColumn("Temps Disponible", width="medium"),
+
+                "Temps Indisponible": st.column_config.TextColumn("Temps Indisponible", width="medium"),
+
+                "Jours avec des données": st.column_config.NumberColumn(
+
+                    "Jours avec des données",
+
+                    width="small",
+
+                ),
+
+            },
+
+        )
+
+
+
+    st.subheader("🔌 Tableau récapitulatif PDC")
+
+    summary_pdc = get_equipment_summary(start_dt, end_dt, site, mode=MODE_PDC)
+
+    if summary_pdc.empty:
+
+        st.info("ℹ️ Aucune donnée consolidée disponible pour les points de charge.")
+
+    else:
+
+        st.dataframe(
+
+            summary_pdc,
+
+            hide_index=True,
+
+            use_container_width=True,
+
+            column_config={
+
+                "Équipement": st.column_config.TextColumn("Équipement", width="medium"),
+
+                "Disponibilité Brute (%)": st.column_config.NumberColumn(
+
+                    "Disponibilité Brute (%)",
+
+                    width="medium",
+
+                    format="%.2f%%",
+
+                ),
+
+                "Disponibilité Avec Exclusions (%)": st.column_config.NumberColumn(
+
+                    "Disponibilité Avec Exclusions (%)",
+
+                    width="medium",
+
+                    format="%.2f%%",
+
+                ),
+
+                "Durée Totale": st.column_config.TextColumn("Durée Totale", width="medium"),
+
+                "Temps Disponible": st.column_config.TextColumn("Temps Disponible", width="medium"),
+
+                "Temps Indisponible": st.column_config.TextColumn("Temps Indisponible", width="medium"),
+
+                "Jours avec des données": st.column_config.NumberColumn(
+
+                    "Jours avec des données",
+
+                    width="small",
+
+                ),
+
+            },
+
+        )
+
+
+
     st.divider()
-    
+
+
+
+    equipment_options = get_all_equipments(site)
+
+    if not equipment_options:
+
+        st.warning("⚠️ Aucun équipement disponible pour ce site.")
+
+        return
+
+
+
+    default_equip = st.session_state.get("overview_selected_equip")
+
+    try:
+
+        equip_index = equipment_options.index(default_equip) if default_equip else 0
+
+    except ValueError:
+
+        equip_index = 0
+
+
+
+    selected_equip = st.selectbox(
+
+        "Équipement à analyser",
+
+        options=equipment_options,
+
+        index=equip_index,
+
+        key="overview_selected_equip",
+
+    )
+
+
+
+    st.session_state["current_site"] = site
+
+    st.session_state["current_equip"] = selected_equip
+
+    st.session_state["current_start_dt"] = start_dt
+
+    st.session_state["current_end_dt"] = end_dt
+
+
+
+    equip_mode = MODE_PDC if selected_equip.upper().startswith("PDC") else MODE_EQUIPMENT
+
+    st.session_state["app_mode"] = equip_mode
+
+
+
+    with st.spinner(f"Analyse des données pour {selected_equip}..."):
+
+        equip_df = load_filtered_blocks(start_dt, end_dt, site, selected_equip, mode=equip_mode)
+
+
+
+    if equip_df is None or equip_df.empty:
+
+        st.warning("⚠️ Aucune donnée disponible pour cet équipement sur la période sélectionnée.")
+
+        return
+
+
+
+    st.subheader("📊 Synthèse de l'équipement")
+
+    equip_stats_raw = calculate_availability(equip_df, include_exclusions=False)
+
+    equip_stats_excl = calculate_availability(equip_df, include_exclusions=True)
+
+
+
+    col_a, col_b, col_c = st.columns(3)
+
+    with col_a:
+
+        st.metric("Disponibilité brute", f"{equip_stats_raw['pct_available']:.2f}%")
+
+    with col_b:
+
+        st.metric(
+
+            "Disponibilité avec exclusions",
+
+            f"{equip_stats_excl['pct_available']:.2f}%",
+
+            delta=f"{equip_stats_excl['pct_available'] - equip_stats_raw['pct_available']:.2f}%",
+
+        )
+
+    with col_c:
+
+        st.metric(
+
+            "Temps indisponible",
+
+            format_minutes(equip_stats_excl['unavailable_minutes']),
+
+            delta_color="inverse",
+
+        )
+
+
+
+    st.divider()
+
     st.subheader("🔍 Analyse des Indisponibilités")
-    causes = get_unavailability_causes(df)
+
+
+
+    causes = get_unavailability_causes(equip_df)
 
     if causes.empty:
+
         st.success("Aucune indisponibilité détectée sur la période")
+
     else:
-        color_map = px.colors.qualitative.Safe  
+
+        color_map = px.colors.qualitative.Safe
+
         unique_causes = causes["cause"].unique()
+
         cause_colors = {cause: color_map[i % len(color_map)] for i, cause in enumerate(unique_causes)}
-        
+
+
+
         col_chart, col_table = st.columns([2, 1])
+
         with col_chart:
+
             small_mask = causes["percentage"] < 2.5
 
             fig = px.pie(
+
                 causes,
+
                 names="cause",
+
                 values="duration_minutes",
+
                 title="Répartition des Causes d'Indisponibilité",
+
                 hole=0.4,
+
                 color="cause",
-                color_discrete_map=cause_colors
+
+                color_discrete_map=cause_colors,
+
             )
 
             fig.update_traces(
+
                 textinfo="percent+label",
-                textposition=[
-                    "outside" if small else "inside" 
-                    for small in small_mask
-                ],
-                pull=[
-                    0.05 if small else 0 
-                    for small in small_mask
-                ],
-                showlegend=True
+
+                textposition=["outside" if small else "inside" for small in small_mask],
+
+                pull=[0.05 if small else 0 for small in small_mask],
+
+                showlegend=True,
+
             )
+
             fig.update_layout(
+
                 uniformtext_minsize=10,
-                uniformtext_mode="hide"
+
+                uniformtext_mode="hide",
+
             )
 
             st.plotly_chart(fig, use_container_width=True)
 
+
+
         with col_table:
+
             df_display = causes.rename(
-                columns={"duration_minutes": "Durée", "percentage": "Pourcentage"}
+
+                columns={"duration_minutes": "Durée", "percentage": "Pourcentage"},
+
             )
+
             st.dataframe(
+
                 df_display.style.format({
+
                     "Durée": lambda x: format_minutes(int(x)),
-                    "Pourcentage": "{:.1f}%"
+
+                    "Pourcentage": "{:.1f}%",
+
                 }),
+
                 hide_index=True,
-                use_container_width=True
-            )
-    
-    # Tableau traduit des causes d'indisponibilité
-    st.subheader("📋 Causes d'Indisponibilité Traduites")
-    
-    # Récupérer l'équipement sélectionné pour la traduction
-    current_equip = st.session_state.get("current_equip")
-    
-    if current_equip and not df.empty:
-        # Générer le tableau traduit
-        causes_translated = get_translated_unavailability_causes(df, current_equip)
-        
-        if not causes_translated.empty:
-            st.info(f"🔧 Traduction des codes IC/PC pour l'équipement **{current_equip}**")
-            
-            # Afficher le tableau traduit avec un style amélioré
-            df_translated_display = causes_translated.rename(
-                columns={
-                    "cause": "Cause Traduite", 
-                    "duration_minutes": "Durée", 
-                    "percentage": "Pourcentage"
-                }
-            )
-            
-            st.dataframe(
-                df_translated_display.style.format({
-                    "Durée": lambda x: format_minutes(int(x)),
-                    "Pourcentage": "{:.1f}%"
-                }),
-                hide_index=True,
+
                 use_container_width=True,
-                column_config={
-                    "Cause Traduite": st.column_config.TextColumn(
-                        "Cause Traduite", 
-                        width="large",
-                        help="Description détaillée de la cause d'indisponibilité"
-                    ),
-                    "Durée": st.column_config.TextColumn("Durée", width="medium"),
-                    "Pourcentage": st.column_config.NumberColumn("Pourcentage", width="small", format="%.1f%%")
-                }
+
             )
-            
-            # Ajouter un expander avec des informations sur la traduction
-            with st.expander("ℹ️ Informations sur la traduction"):
-                st.markdown("""
-                **Comment fonctionne la traduction :**
-                
-                - Les codes IC (Input Condition) et PC (Process Condition) sont extraits des causes d'indisponibilité
-                - Chaque code est traduit selon la configuration de l'équipement :
-                  - **AC** : SEQ01.OLI.A.IC1 / SEQ01.OLI.A.PC1
-                  - **DC1** : SEQ02.OLI.A.IC1 / SEQ02.OLI.A.PC1
-                  - **DC2** : SEQ03.OLI.A.IC1 / SEQ03.OLI.A.PC1
-                  - **PDC** : SEQ1x/SEQ2x selon le point de charge (ex. SEQ12, SEQ22, SEQ13…)
-                - Les descriptions détaillées incluent les références matérielles et les conditions de défaut
-                """)
-                
-                # Afficher la configuration de l'équipement
-                cfg = get_equip_config(current_equip)
-                st.markdown(f"""
-                **Configuration actuelle ({current_equip}) :**
-                - Champ IC : `{cfg['ic_field']}`
-                - Champ PC : `{cfg['pc_field']}`
-                - Titre : {cfg['title']}
-                """)
-        else:
-            st.info("ℹ️ Aucune cause d'indisponibilité à traduire pour cet équipement.")
+
+
+
+    st.subheader("📋 Causes d'Indisponibilité Traduites")
+
+    causes_translated = get_translated_unavailability_causes(equip_df, selected_equip)
+
+    if causes_translated.empty:
+
+        st.info("ℹ️ Aucune cause d'indisponibilité à traduire pour cet équipement.")
+
     else:
-        if not current_equip:
-            st.warning("⚠️ Veuillez sélectionner un équipement spécifique pour voir les causes traduites.")
-        else:
-            st.info("ℹ️ Aucune donnée disponible pour la traduction des causes.")
+
+        st.info(f"🔧 Traduction des codes IC/PC pour l'équipement **{selected_equip}**")
+
+        df_translated_display = causes_translated.rename(
+
+            columns={
+
+                "cause": "Cause Traduite",
+
+                "duration_minutes": "Durée",
+
+                "percentage": "Pourcentage",
+
+            }
+
+        )
+
+        st.dataframe(
+
+            df_translated_display.style.format({
+
+                "Durée": lambda x: format_minutes(int(x)),
+
+                "Pourcentage": "{:.1f}%",
+
+            }),
+
+            hide_index=True,
+
+            use_container_width=True,
+
+            column_config={
+
+                "Cause Traduite": st.column_config.TextColumn(
+
+                    "Cause Traduite",
+
+                    width="large",
+
+                    help="Description détaillée de la cause d'indisponibilité",
+
+                ),
+
+                "Durée": st.column_config.TextColumn("Durée", width="medium"),
+
+                "Pourcentage": st.column_config.NumberColumn("Pourcentage", width="small", format="%.1f%%"),
+
+            },
+
+        )
+
+        with st.expander("ℹ️ Informations sur la traduction"):
+
+            st.markdown("""
+
+            **Comment fonctionne la traduction :**
+
+
+
+            - Les codes IC (Input Condition) et PC (Process Condition) sont extraits des causes d'indisponibilité
+
+            - Chaque code est traduit selon la configuration de l'équipement :
+
+              - **AC** : SEQ01.OLI.A.IC1 / SEQ01.OLI.A.PC1
+
+              - **DC1** : SEQ02.OLI.A.IC1 / SEQ02.OLI.A.PC1
+
+              - **DC2** : SEQ03.OLI.A.IC1 / SEQ03.OLI.A.PC1
+
+              - **PDC** : SEQ1x/SEQ2x selon le point de charge (ex. SEQ12, SEQ22, SEQ13…)
+
+            - Les descriptions détaillées incluent les références matérielles et les conditions de défaut
+
+            """)
+
+            cfg = get_equip_config(selected_equip)
+
+            st.markdown(f"""
+
+            **Configuration actuelle ({selected_equip}) :**
+
+            - Champ IC : `{cfg['ic_field']}`
+
+            - Champ PC : `{cfg['pc_field']}`
+
+            - Titre : {cfg['title']}
+
+            """)
+
+
 
     st.divider()
 
-    
-    # evolution mensuelle
     st.subheader("📅 Évolution Mensuelle")
-    site = st.session_state.get("current_site")
-    equip = st.session_state.get("current_equip")
-    start_dt = st.session_state.get("current_start_dt")
-    end_dt = st.session_state.get("current_end_dt")
 
-    df_monthly = calculate_monthly_availability(site, equip, months=12, start_dt=start_dt, end_dt=end_dt, mode=mode)
+
+
+    df_monthly = calculate_monthly_availability(
+
+        site,
+
+        selected_equip,
+
+        months=12,
+
+        start_dt=start_dt,
+
+        end_dt=end_dt,
+
+        mode=equip_mode,
+
+    )
+
     if not df_monthly.empty:
-        months_series = pd.to_datetime(df_monthly["month"])
-        month_keys = months_series.dt.strftime("%Y-%m")             
-        month_labels = months_series.dt.strftime("%b %Y")            
-        month_options = list(dict(zip(month_keys, month_labels)).items())  
 
-        default_keys = list(dict.fromkeys(month_keys)) 
+        months_series = pd.to_datetime(df_monthly["month"])
+
+        month_keys = months_series.dt.strftime("%Y-%m")
+
+        month_labels = months_series.dt.strftime("%b %Y")
+
+        month_options = list(dict(zip(month_keys, month_labels)).items())
+
+        default_keys = list(dict.fromkeys(month_keys))
 
         sel_keys = st.multiselect(
+
             "Mois à afficher",
+
             options=[k for k, _ in month_options],
+
             format_func=lambda k: dict(month_options)[k],
-            default=default_keys
+
+            default=default_keys,
+
         )
 
         df_monthly = df_monthly[month_keys.isin(sel_keys)].copy()
+
         df_monthly = df_monthly.sort_values("month")
+
     if df_monthly.empty:
+
         st.info("ℹ️ Données mensuelles insuffisantes pour l'affichage.")
+
     else:
+
         brut = df_monthly["pct_brut"].astype(float).where(pd.notna(df_monthly["pct_brut"]), None)
+
         excl = df_monthly["pct_excl"].astype(float).where(pd.notna(df_monthly["pct_excl"]), None)
 
         fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=df_monthly["month"], y=brut, name="Brute",
-            text=[f"{v:.1f}%" if v is not None else "" for v in brut],
-            textposition="outside",
-        ))
-        fig.add_trace(go.Bar(
-            x=df_monthly["month"], y=excl, name="Avec exclusions",
-            text=[f"{v:.1f}%" if v is not None else "" for v in excl],
-            textposition="outside",
-        ))
+
+        fig.add_trace(
+
+            go.Bar(
+
+                x=df_monthly["month"],
+
+                y=brut,
+
+                name="Brute",
+
+                text=[f"{v:.1f}%" if v is not None else "" for v in brut],
+
+                textposition="outside",
+
+            )
+
+        )
+
+        fig.add_trace(
+
+            go.Bar(
+
+                x=df_monthly["month"],
+
+                y=excl,
+
+                name="Avec exclusions",
+
+                text=[f"{v:.1f}%" if v is not None else "" for v in excl],
+
+                textposition="outside",
+
+            )
+
+        )
 
         fig.update_layout(
+
             title="Disponibilité mensuelle",
+
             xaxis_title="Mois",
+
             yaxis_title="Disponibilité (%)",
+
             yaxis=dict(range=[0, 105]),
+
             barmode="group",
+
             bargap=0.25,
+
             hovermode="x",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+
+            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+
         )
+
         fig.update_xaxes(tickformat="%b %Y")
 
         st.plotly_chart(fig, use_container_width=True)
+
         with st.expander("📊 Statistiques détaillées"):
+
             df_display = df_monthly.copy()
+
             try:
-                mois_labels = pd.to_datetime(df_display["month"]).dt.month_name(locale="fr_FR").str.capitalize() \
-                            + " " + pd.to_datetime(df_display["month"]).dt.year.astype(str)
+
+                mois_labels = pd.to_datetime(df_display["month"]).dt.month_name(locale="fr_FR").str.capitalize() + " " + pd.to_datetime(df_display["month"]).dt.year.astype(str)
+
             except Exception:
-                _mois = ["janvier","février","mars","avril","mai","juin",
-                        "juillet","août","septembre","octobre","novembre","décembre"]
+
+                _mois = ["janvier","février","mars","avril","mai","juin","juillet","août","septembre","octobre","novembre","décembre"]
+
                 m = pd.to_datetime(df_display["month"])
+
                 mois_labels = m.dt.month.map(lambda i: _mois[i-1]).str.capitalize() + " " + m.dt.year.astype(str)
 
             df_display["Mois"] = mois_labels
+
             df_display = df_display.rename(columns={
+
                 "pct_brut": "Disponibilité brute",
+
                 "pct_excl": "Avec exclusions",
-                "total_minutes": "Durée totale"
+
+                "total_minutes": "Durée totale",
+
             })[["Mois", "Disponibilité brute", "Avec exclusions", "Durée totale"]]
 
-            def _fmt_duree(x):
+
+
+            def _fmt_duree(x: object) -> str:
+
                 try:
-                    return format_minutes(int(x))  
+
+                    return format_minutes(int(x))
+
                 except Exception:
+
                     return "—"
 
+
+
             st.dataframe(
+
                 df_display.style.format({
+
                     "Disponibilité brute": "{:.2f}%",
+
                     "Avec exclusions": "{:.2f}%",
-                    "Durée totale": _fmt_duree
+
+                    "Durée totale": _fmt_duree,
+
                 }),
+
                 hide_index=True,
-                use_container_width=True
+
+                use_container_width=True,
+
             )
 
 
-def render_global_comparison_tab(start_dt: datetime, end_dt: datetime) -> None:
-    """Affiche la vue comparative entre tous les sites."""
-    mode = get_current_mode()
-    st.header("🌍 Vue générale - Comparaison tous les sites")
-    st.caption(
-        f"Période analysée : {start_dt.strftime('%Y-%m-%d')} ➜ {end_dt.strftime('%Y-%m-%d')}"
+
+def render_timeline_tab(site: Optional[str], start_dt: datetime, end_dt: datetime) -> None:
+
+    """Affiche l'onglet timeline et annotations pour un équipement."""
+
+    st.header("⏱️ Timeline Détaillée & Annotations")
+
+
+
+    if not site:
+
+        st.info("ℹ️ Sélectionnez un site pour accéder à la timeline détaillée.")
+
+        return
+
+
+
+    equipment_options = get_all_equipments(site)
+
+    if not equipment_options:
+
+        st.warning("⚠️ Aucun équipement disponible pour ce site.")
+
+        return
+
+
+
+    default_equip = st.session_state.get("timeline_selected_equip")
+
+    try:
+
+        equip_index = equipment_options.index(default_equip) if default_equip else 0
+
+    except ValueError:
+
+        equip_index = 0
+
+
+
+    selected_equip = st.selectbox(
+
+        "Équipement",
+
+        options=equipment_options,
+
+        index=equip_index,
+
+        key="timeline_selected_equip",
+
+        help="Choisissez l'équipement à analyser dans la timeline",
+
     )
 
-    df_all = load_filtered_blocks(start_dt, end_dt, None, None, mode=mode)
-
-    if df_all is None or df_all.empty:
-        st.warning("Aucune donnée disponible pour la vue globale sur la période sélectionnée.")
-        return
-
-    if mode == MODE_EQUIPMENT:
-        st.subheader("Récap AC / DC1 / DC2")
-        if "type_equipement" not in df_all.columns:
-            st.info("Les données de type équipement ne sont pas disponibles pour cette vue.")
-            return
-
-        base_types = ["AC", "DC1", "DC2"]
-        additional_types = [
-            t for t in df_all["type_equipement"].dropna().unique().tolist()
-            if t not in base_types
-        ]
-        type_sequence = base_types + additional_types
-
-        site_rows: List[Dict[str, Optional[float]]] = []
-        for site, site_df in df_all.groupby("site"):
-            site_label = mapping_sites.get(str(site).split("_")[-1], str(site))
-            row: Dict[str, Optional[float]] = {"Site": site_label}
-            for equip_type in type_sequence:
-                type_df = site_df[site_df["type_equipement"] == equip_type]
-                column_label = f"{equip_type} (%)"
-                if type_df.empty:
-                    row[column_label] = math.nan
-                else:
-                    stats = calculate_availability(type_df, include_exclusions=False)
-                    row[column_label] = round(stats["pct_available"], 2)
-            site_rows.append(row)
-
-        summary_df = pd.DataFrame(site_rows)
-        summary_df = summary_df.dropna(axis=1, how="all")
-        if summary_df.empty:
-            st.info("Aucune donnée consolidée disponible pour les sites.")
-        else:
-            summary_df = summary_df.sort_values("Site").reset_index(drop=True)
-            column_config = {
-                "Site": st.column_config.TextColumn("Site", width="medium"),
-            }
-            for column in summary_df.columns:
-                if column == "Site":
-                    continue
-                column_config[column] = st.column_config.NumberColumn(
-                    column,
-                    width="small",
-                    format="%.2f%%"
-                )
-
-            st.dataframe(
-                summary_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config=column_config,
-            )
-
-        present_types = [
-            t for t in type_sequence
-            if not df_all[df_all["type_equipement"] == t].empty
-        ]
-        if present_types:
-            cols = st.columns(len(present_types))
-            for col, equip_type in zip(cols, present_types):
-                type_df = df_all[df_all["type_equipement"] == equip_type]
-                stats_raw = calculate_availability(type_df, include_exclusions=False)
-                stats_excl = calculate_availability(type_df, include_exclusions=True)
-                delta = stats_excl["pct_available"] - stats_raw["pct_available"]
-                col.metric(
-                    f"{equip_type} - disponibilité brute",
-                    f"{stats_raw['pct_available']:.2f}%",
-                    delta=f"{delta:.2f}%",
-                    help="Comparaison agrégée sur l'ensemble des sites",
-                )
-    else:
-        st.subheader("Dispo globale par site")
-        site_rows = []
-        for site, site_df in df_all.groupby("site"):
-            stats_raw = calculate_availability(site_df, include_exclusions=False)
-            stats_excl = calculate_availability(site_df, include_exclusions=True)
-            site_rows.append({
-                "Site": mapping_sites.get(str(site).split("_")[-1], str(site)),
-                "Disponibilité brute (%)": round(stats_raw["pct_available"], 2),
-                "Disponibilité avec exclusions (%)": round(stats_excl["pct_available"], 2),
-            })
-
-        summary_df = pd.DataFrame(site_rows)
-        if summary_df.empty:
-            st.info("Aucune donnée consolidée disponible pour les sites.")
-        else:
-            summary_df = summary_df.sort_values("Site").reset_index(drop=True)
-            st.dataframe(
-                summary_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Site": st.column_config.TextColumn("Site", width="medium"),
-                    "Disponibilité brute (%)": st.column_config.NumberColumn(
-                        "Disponibilité brute (%)",
-                        width="medium",
-                        format="%.2f%%",
-                    ),
-                    "Disponibilité avec exclusions (%)": st.column_config.NumberColumn(
-                        "Disponibilité avec exclusions (%)",
-                        width="medium",
-                        format="%.2f%%",
-                    ),
-                },
-            )
-
-        stats_all_raw = calculate_availability(df_all, include_exclusions=False)
-        stats_all_excl = calculate_availability(df_all, include_exclusions=True)
-        delta = stats_all_excl["pct_available"] - stats_all_raw["pct_available"]
-        col1, col2 = st.columns(2)
-        col1.metric(
-            "Disponibilité brute globale",
-            f"{stats_all_raw['pct_available']:.2f}%",
-            help="Disponibilité brute de l'ensemble des points de charge",
-        )
-        col2.metric(
-            "Disponibilité avec exclusions globale",
-            f"{stats_all_excl['pct_available']:.2f}%",
-            delta=f"{delta:.2f}%",
-            help="Comparaison brute vs exclusions sur tous les sites",
-        )
 
 
-def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: datetime, end_dt: datetime):
-    """Affiche l'onglet timeline et annotations."""
-    mode = get_current_mode()
-    st.header("⏱️ Timeline Détaillée & Annotations")
-    
-    if not site or not equip:
-        st.info("ℹ️ Veuillez sélectionner un site et un équipement spécifiques pour afficher la timeline détaillée.")
-        return
-    
+    equip_mode = MODE_PDC if selected_equip.upper().startswith("PDC") else MODE_EQUIPMENT
+
+    st.session_state["app_mode"] = equip_mode
+
+
+
     with st.spinner("Chargement de la timeline..."):
-        df = load_blocks(site, equip, start_dt, end_dt, mode=mode)
-    
+
+        df = load_blocks(site, selected_equip, start_dt, end_dt, mode=equip_mode)
+
+
+
     if df.empty:
+
         st.warning("⚠️ Aucune donnée disponible pour cet équipement sur cette période.")
+
         return
-    
+
+
+
+    st.session_state["current_site"] = site
+
+    st.session_state["current_equip"] = selected_equip
+
+    st.session_state["current_start_dt"] = start_dt
+
+    st.session_state["current_end_dt"] = end_dt
+
+
+
     df_plot = df.copy()
+
     df_plot["start"] = pd.to_datetime(df_plot["date_debut"])
+
     df_plot["end"] = pd.to_datetime(df_plot["date_fin"])
+
     df_plot["state"] = df_plot["est_disponible"].map({
+
         1: "✅ Disponible",
+
         0: "❌ Indisponible",
-        -1: "⚠️ Donnée manquante"
+
+        -1: "⚠️ Donnée manquante",
+
     })
 
     df_plot["excluded"] = ""
+
     mask_excluded = df_plot["is_excluded"] == 1
+
     df_plot.loc[mask_excluded, "excluded"] = " (Exclu)"
+
     df_plot["label"] = df_plot["state"] + df_plot["excluded"]
-    
+
+
+
     fig = px.timeline(
+
         df_plot,
+
         x_start="start",
+
         x_end="end",
+
         y="equipement_id",
+
         color="label",
+
         hover_data={
+
             "cause": True,
+
             "duration_minutes": True,
+
             "is_excluded": True,
+
             "start": "|%Y-%m-%d %H:%M",
+
             "end": "|%Y-%m-%d %H:%M",
+
             "label": False,
-            "equipement_id": False
+
+            "equipement_id": False,
+
         },
+
         color_discrete_map={
+
             "✅ Disponible": "#28a745",
+
             "✅ Disponible (Exclu)": "#17a2b8",
+
             "❌ Indisponible": "#dc3545",
+
             "❌ Indisponible (Exclu)": "#fd7e14",
+
             "⚠️ Donnée manquante": "#6c757d",
-            "⚠️ Donnée manquante (Exclu)": "#BBDB07"
-        }
+
+            "⚠️ Donnée manquante (Exclu)": "#BBDB07",
+
+        },
+
     )
-    
+
     fig.update_yaxes(autorange="reversed", title="")
+
     fig.update_xaxes(title="Période")
+
     fig.update_layout(
-        title=f"Timeline - {site} / {equip}",
+
+        title=f"Timeline - {site} / {selected_equip}",
+
         showlegend=True,
-        height=300
+
+        height=300,
+
     )
-    
+
     st.plotly_chart(fig, use_container_width=True)
-    
-    # Tableau des vraies périodes d'indisponibilité (groupées)
-    st.markdown("**📋 Périodes d'Indisponibilité Continues :**")
-    
-    # Filtrer les indisponibilités
-    unavailable_periods = df[df["est_disponible"] == 0].copy()
-    
-    if not unavailable_periods.empty:
-        # Trier par date de début
-        unavailable_periods = unavailable_periods.sort_values("date_debut").reset_index(drop=True)
-        
-        # Grouper les périodes continues
-        continuous_periods = []
-        current_period = None
-        
-        for _, row in unavailable_periods.iterrows():
-            start_time = pd.to_datetime(row["date_debut"])
-            end_time = pd.to_datetime(row["date_fin"])
-            
-            if current_period is None:
-                # Première période
-                current_period = {
-                    "start": start_time,
-                    "end": end_time,
-                    "causes": [row["cause"] if pd.notna(row["cause"]) else "Non spécifiée"],
-                    "excluded": row["is_excluded"] == 1,
-                    "duration_minutes": int(row["duration_minutes"])
-                }
-            else:
-                # Vérifier si cette période est continue avec la précédente
-                # (écart de moins de 5 minutes considéré comme continu)
-                gap_minutes = (start_time - current_period["end"]).total_seconds() / 60
-                
-                if gap_minutes <= 5:  # Période continue
-                    # Étendre la période actuelle
-                    current_period["end"] = end_time
-                    current_period["causes"].append(row["cause"] if pd.notna(row["cause"]) else "Non spécifiée")
-                    current_period["duration_minutes"] += int(row["duration_minutes"])
-                    # Si une période est exclue, toute la période continue est considérée comme exclue
-                    if row["is_excluded"] == 1:
-                        current_period["excluded"] = True
-                else:
-                    # Nouvelle période - sauvegarder la précédente
-                    continuous_periods.append(current_period)
-                    # Commencer une nouvelle période
-                    current_period = {
-                        "start": start_time,
-                        "end": end_time,
-                        "causes": [row["cause"] if pd.notna(row["cause"]) else "Non spécifiée"],
-                        "excluded": row["is_excluded"] == 1,
-                        "duration_minutes": int(row["duration_minutes"])
-                    }
-        
-        # Ajouter la dernière période
-        if current_period is not None:
-            continuous_periods.append(current_period)
-        
-        if continuous_periods:
-            # Préparer les données pour le tableau
-            periods_data = []
-            for i, period in enumerate(continuous_periods, 1):
-                # Calculer la durée totale de la période continue
-                total_duration_minutes = int((period["end"] - period["start"]).total_seconds() / 60)
-                
-                # Créer un résumé des causes (prendre les causes uniques)
-                unique_causes = list(set(period["causes"]))
-                if len(unique_causes) == 1:
-                    cause_summary = unique_causes[0]
-                else:
-                    cause_summary = f"{len(unique_causes)} causes différentes"
-                
-                periods_data.append({
-                    "Période": f"Période {i}",
-                    "Date Début": period["start"].strftime("%Y-%m-%d %H:%M"),
-                    "Date Fin": period["end"].strftime("%Y-%m-%d %H:%M"),
-                    "Durée": format_minutes(total_duration_minutes),
-                    "Durée_Minutes": total_duration_minutes,
-                    "Cause": cause_summary,
-                    "Exclu": "✅ Oui" if period["excluded"] else "❌ Non"
-                })
-            
-            # Créer le DataFrame et trier par durée décroissante
-            periods_df = pd.DataFrame(periods_data)
-            periods_sorted = periods_df.sort_values("Durée_Minutes", ascending=False)
-            
-            st.dataframe(
-                periods_sorted[["Période", "Date Début", "Date Fin", "Durée", "Cause", "Exclu"]],
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Période": st.column_config.TextColumn("Période", width="small"),
-                    "Date Début": st.column_config.TextColumn("Date Début", width="medium"),
-                    "Date Fin": st.column_config.TextColumn("Date Fin", width="medium"),
-                    "Durée": st.column_config.TextColumn("Durée", width="medium"),
-                    "Cause": st.column_config.TextColumn("Cause", width="large"),
-                    "Exclu": st.column_config.TextColumn("Exclu", width="small")
-                }
-            )
-            
-            # Métriques rapides
-            col1, col2, col3, col4 = st.columns(4)
-            with col1:
-                st.metric("Total Périodes", len(periods_data))
-            with col2:
-                total_duration = periods_df["Durée_Minutes"].sum()
-                st.metric("Durée Totale", format_minutes(total_duration))
-            with col3:
-                avg_duration = periods_df["Durée_Minutes"].mean()
-                st.metric("Durée Moyenne", format_minutes(int(avg_duration)))
-            with col4:
-                max_duration = periods_df["Durée_Minutes"].max()
-                st.metric("Durée Max", format_minutes(max_duration))
-        else:
-            st.success("✅ Aucune période d'indisponibilité continue détectée.")
+
+
+
+    st.subheader("📅 Évolution Mensuelle")
+
+    df_monthly = calculate_monthly_availability(
+
+        site,
+
+        selected_equip,
+
+        months=12,
+
+        start_dt=start_dt,
+
+        end_dt=end_dt,
+
+        mode=equip_mode,
+
+    )
+
+    if df_monthly.empty:
+
+        st.info("ℹ️ Données mensuelles insuffisantes pour l'affichage.")
+
     else:
-        st.success("✅ Aucune période d'indisponibilité détectée sur cette période.")
-    
+
+        months_series = pd.to_datetime(df_monthly["month"])
+
+        month_keys = months_series.dt.strftime("%Y-%m")
+
+        month_labels = months_series.dt.strftime("%b %Y")
+
+        month_options = list(dict(zip(month_keys, month_labels)).items())
+
+        default_keys = list(dict.fromkeys(month_keys))
+
+        sel_keys = st.multiselect(
+
+            "Mois à afficher",
+
+            options=[k for k, _ in month_options],
+
+            format_func=lambda k: dict(month_options)[k],
+
+            default=default_keys,
+
+            key="timeline_month_filter",
+
+        )
+
+        df_monthly = df_monthly[month_keys.isin(sel_keys)].copy()
+
+        df_monthly = df_monthly.sort_values("month")
+
+        if df_monthly.empty:
+
+            st.info("ℹ️ Sélectionnez au moins un mois pour afficher le graphique.")
+
+        else:
+
+            brut = df_monthly["pct_brut"].astype(float).where(pd.notna(df_monthly["pct_brut"]), None)
+
+            excl = df_monthly["pct_excl"].astype(float).where(pd.notna(df_monthly["pct_excl"]), None)
+
+            fig_month = go.Figure()
+
+            fig_month.add_trace(
+
+                go.Bar(
+
+                    x=df_monthly["month"],
+
+                    y=brut,
+
+                    name="Brute",
+
+                    text=[f"{v:.1f}%" if v is not None else "" for v in brut],
+
+                    textposition="outside",
+
+                )
+
+            )
+
+            fig_month.add_trace(
+
+                go.Bar(
+
+                    x=df_monthly["month"],
+
+                    y=excl,
+
+                    name="Avec exclusions",
+
+                    text=[f"{v:.1f}%" if v is not None else "" for v in excl],
+
+                    textposition="outside",
+
+                )
+
+            )
+
+            fig_month.update_layout(
+
+                title="Disponibilité mensuelle",
+
+                xaxis_title="Mois",
+
+                yaxis_title="Disponibilité (%)",
+
+                yaxis=dict(range=[0, 105]),
+
+                barmode="group",
+
+                bargap=0.25,
+
+                hovermode="x",
+
+                legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+
+            )
+
+            fig_month.update_xaxes(tickformat="%b %Y")
+
+            st.plotly_chart(fig_month, use_container_width=True)
+
+
+
     st.divider()
+
+    st.subheader("📋 Périodes d'Indisponibilité Continues")
+
+
+
+    unavailable_periods = df[df["est_disponible"] == 0].copy()
+
+    if unavailable_periods.empty:
+
+        st.success("✅ Aucune période d'indisponibilité détectée sur cette période.")
+
+    else:
+
+        unavailable_periods = unavailable_periods.sort_values("date_debut").reset_index(drop=True)
+
+        grouped_periods: List[Dict[str, object]] = []
+
+        current_period: Optional[Dict[str, object]] = None
+
+
+
+        for _, row in unavailable_periods.iterrows():
+
+            start = pd.to_datetime(row["date_debut"])
+
+            end = pd.to_datetime(row["date_fin"])
+
+            cause = row.get("cause", "N/A")
+
+            excluded = bool(int(row.get("is_excluded", 0)))
+
+
+
+            if current_period and start <= current_period["end"]:
+
+                current_period["end"] = max(current_period["end"], end)
+
+                current_period["duration"] += int(row.get("duration_minutes", 0))
+
+                current_period["causes"].append(cause)
+
+                current_period["excluded"] = current_period["excluded"] or excluded
+
+            else:
+
+                current_period = {
+
+                    "start": start,
+
+                    "end": end,
+
+                    "duration": int(row.get("duration_minutes", 0)),
+
+                    "causes": [cause],
+
+                    "excluded": excluded,
+
+                }
+
+                grouped_periods.append(current_period)
+
+
+
+        if grouped_periods:
+
+            periods_data = []
+
+            for idx, period in enumerate(grouped_periods, start=1):
+
+                cause_summary = ", ".join(sorted({c for c in period["causes"] if c})) or "Cause non spécifiée"
+
+                total_duration_minutes = period["duration"]
+
+                periods_data.append({
+
+                    "Période": f"#{idx}",
+
+                    "Date Début": period["start"].strftime("%Y-%m-%d %H:%M"),
+
+                    "Date Fin": period["end"].strftime("%Y-%m-%d %H:%M"),
+
+                    "Durée": format_minutes(total_duration_minutes),
+
+                    "Durée_Minutes": total_duration_minutes,
+
+                    "Cause": cause_summary,
+
+                    "Exclu": "✅ Oui" if period["excluded"] else "❌ Non",
+
+                })
+
+
+
+            periods_df = pd.DataFrame(periods_data)
+
+            periods_sorted = periods_df.sort_values("Durée_Minutes", ascending=False)
+
+            st.dataframe(
+
+                periods_sorted[["Période", "Date Début", "Date Fin", "Durée", "Cause", "Exclu"]],
+
+                hide_index=True,
+
+                use_container_width=True,
+
+                column_config={
+
+                    "Période": st.column_config.TextColumn("Période", width="small"),
+
+                    "Date Début": st.column_config.TextColumn("Date Début", width="medium"),
+
+                    "Date Fin": st.column_config.TextColumn("Date Fin", width="medium"),
+
+                    "Durée": st.column_config.TextColumn("Durée", width="medium"),
+
+                    "Cause": st.column_config.TextColumn("Cause", width="large"),
+
+                    "Exclu": st.column_config.TextColumn("Exclu", width="small"),
+
+                },
+
+            )
+
+
+
+            col1, col2, col3, col4 = st.columns(4)
+
+            with col1:
+
+                st.metric("Total Périodes", len(periods_data))
+
+            with col2:
+
+                total_duration = periods_df["Durée_Minutes"].sum()
+
+                st.metric("Durée Totale", format_minutes(total_duration))
+
+            with col3:
+
+                avg_duration = periods_df["Durée_Minutes"].mean()
+
+                st.metric("Durée Moyenne", format_minutes(int(avg_duration)))
+
+            with col4:
+
+                max_duration = periods_df["Durée_Minutes"].max()
+
+                st.metric("Durée Max", format_minutes(max_duration))
+
+        else:
+
+            st.success("✅ Aucune période d'indisponibilité continue détectée.")
+
+
+
+    st.divider()
+
     st.subheader("➕ Ajouter une Annotation")
 
-    mode = st.radio(
+
+
+    mode_display = st.radio(
+
         "Afficher",
+
         options=["Disponibles", "Indisponibles", "Données manquantes"],
-        index=1,           
-        horizontal=True
+
+        index=1,
+
+        horizontal=True,
+
     )
 
-    if mode == "Disponibles":
+
+
+    if mode_display == "Disponibles":
+
         df_display = df_plot[df_plot["est_disponible"] == 1]
-    elif mode == "Indisponibles":
+
+    elif mode_display == "Indisponibles":
+
         df_display = df_plot[df_plot["est_disponible"] == 0]
-    else:  
+
+    else:
+
         df_display = df_plot[df_plot["est_disponible"] == -1]
 
+
+
     if df_display.empty:
+
         st.info("ℹ️ Aucun bloc correspondant aux critères d'affichage.")
-    else:
-        df_display = df_display.sort_values("start").reset_index(drop=True)
 
-        block_labels = []
-        for idx, row in df_display.iterrows():
-            if row["est_disponible"] == -1:
-                status_icon = "⚠️"
-            elif row["est_disponible"] == 0:
-                status_icon = "❌"
-            else:
-                status_icon = "✅"
-
-            excl_tag = " [EXCLU]" if row["is_excluded"] == 1 else ""
-            start_str = row["start"].strftime("%Y-%m-%d %H:%M")
-            end_str = row["end"].strftime("%Y-%m-%d %H:%M")
-            cause = row.get("cause", "N/A")
-            duration = format_minutes(int(row["duration_minutes"]))
-
-            label = f"{idx}: {status_icon} {start_str} → {end_str} | {cause} | {duration}{excl_tag}"
-            block_labels.append(label)
-
-        selected_block_label = st.selectbox(
-            "Sélectionner un bloc temporel",
-            options=block_labels,
-            help="Choisissez le bloc sur lequel ajouter une annotation"
-        )
-
-        selected_idx = int(selected_block_label.split(":")[0])
-        selected_row = df_display.iloc[selected_idx]
-        est_val = int(selected_row["est_disponible"])
-
-        bloc_id = int(selected_row.get("bloc_id", -1))
-        source_table = str(selected_row.get("source_table", "") or "")
-
-        active_exclusion = bool(int(selected_row.get("is_excluded", 0)))
-        exclusion_id = selected_row.get("exclusion_id")
-
-        st.markdown("### 🚫 Gestion de l'exclusion du bloc")
-        if bloc_id <= 0 or not source_table:
-            st.warning(
-                "⚠️ Impossible d'identifier ce bloc dans la base : aucune action d'exclusion n'est possible."
-            )
-        else:
-            if active_exclusion:
-                st.info("Ce bloc est actuellement exclu des calculs.")
-                applied_by = selected_row.get("exclusion_applied_by")
-                applied_at = selected_row.get("exclusion_applied_at")
-                applied_comment = selected_row.get("exclusion_comment")
-                previous_status = int(selected_row.get("previous_status", est_val))
-
-                with st.expander("Détails de l'exclusion active", expanded=True):
-                    st.write(
-                        {
-                            "Exclusion #": exclusion_id or "—",
-                            "Appliquée par": applied_by or "—",
-                            "Appliquée le": applied_at.strftime("%Y-%m-%d %H:%M") if isinstance(applied_at, datetime) else str(applied_at or "—"),
-                            "Statut initial": {1: "Disponible", 0: "Indisponible", -1: "Donnée manquante"}.get(previous_status, "Inconnu"),
-                            "Commentaire": applied_comment or "—",
-                        }
-                    )
-
-                with st.form(f"release_exclusion_{bloc_id}"):
-                    release_operator = st.text_input(
-                        "Opérateur (historisation)",
-                        value="",
-                        placeholder="ex: Jean Dupont",
-                        help="Identifiez la personne qui supprime l'exclusion.",
-                    )
-                    release_comment = st.text_area(
-                        "Commentaire de réactivation",
-                        placeholder="Décrivez pourquoi cette exclusion est levée...",
-                        help="Un commentaire détaillé est requis pour tracer le rollback.",
-                    )
-                    submit_release = st.form_submit_button("♻️ Lever l'exclusion et restaurer l'état d'origine")
-
-                    if submit_release:
-                        release_txt = release_comment.strip()
-                        if len(release_txt) < 5:
-                            st.error("❌ Le commentaire doit contenir au moins 5 caractères.")
-                        else:
-                            try:
-                                result = release_block_exclusion(
-                                    table_name=source_table,
-                                    block_id=bloc_id,
-                                    user=release_operator.strip() or None,
-                                    comment=release_txt,
-                                )
-                            except ExclusionError as exc:
-                                st.error(f"❌ Impossible de lever l'exclusion : {exc}")
-                            else:
-                                st.success(
-                                    f"✅ Bloc {result.block_id} restauré avec le statut {result.new_status} (table {result.table_name})."
-                                )
-                                st.balloons()
-                                st.rerun()
-            else:
-                st.warning("Ce bloc est actuellement comptabilisé normalement.")
-                with st.form(f"apply_exclusion_{bloc_id}"):
-                    exclusion_operator = st.text_input(
-                        "Opérateur (historisation)",
-                        value="",
-                        placeholder="ex: Jean Dupont",
-                        help="Identifiez la personne à l'origine de l'exclusion.",
-                    )
-                    exclusion_comment = st.text_area(
-                        "Commentaire obligatoire",
-                        placeholder="Décrivez pourquoi cette période doit être exclue...",
-                        help="Ce commentaire sera stocké pour permettre un rollback.",
-                    )
-                    target_status = 1
-                    if est_val == -1:
-                        status_labels = {
-                            1: "✅ Disponible (1)",
-                            0: "⛔ Indisponible (0)",
-                        }
-                        target_status = st.radio(
-                            "Statut à appliquer pendant l'exclusion",
-                            options=[1, 0],
-                            index=0,
-                            format_func=lambda x: status_labels.get(int(x), str(x)),
-                            horizontal=True,
-                            help="Choisissez le statut à appliquer lorsque les données sont manquantes.",
-                        )
-                    else:
-                        st.caption(
-                            "Le bloc sera marqué comme disponible pendant la période d'exclusion."
-                        )
-
-                    button_label = (
-                        "🚫 Exclure ce bloc et le marquer comme "
-                        f"{'disponible' if int(target_status) == 1 else 'indisponible'}"
-                    )
-                    submit_exclusion = st.form_submit_button(button_label)
-
-                    if submit_exclusion:
-                        comment_txt = exclusion_comment.strip()
-                        if len(comment_txt) < 5:
-                            st.error("❌ Le commentaire doit contenir au moins 5 caractères.")
-                        else:
-                            try:
-                                result = apply_block_exclusion(
-                                    table_name=source_table,
-                                    block_id=bloc_id,
-                                    user=exclusion_operator.strip() or None,
-                                    comment=comment_txt,
-                                    new_status=int(target_status),
-                                )
-                            except ExclusionError as exc:
-                                st.error(f"❌ Impossible de créer l'exclusion : {exc}")
-                            else:
-                                st.success(
-                                    "✅ Bloc {bloc} exclu et marqué {statut} (table {table}).".format(
-                                        bloc=result.block_id,
-                                        statut="disponible" if result.new_status == 1 else "indisponible",
-                                        table=result.table_name,
-                                    )
-                                )
-                                st.balloons()
-                                st.rerun()
-
-            start_display = _format_timestamp_display(selected_row["start"])
-            end_display = _format_timestamp_display(selected_row["end"])
-            st.markdown(f"**Bloc sélectionné:** {start_display} → {end_display}")
-            
-            if est_val != 1: 
-                cause_originale = selected_row.get("cause", "Non spécifié")
-                equip_current = st.session_state.get("current_equip")
-                
-                if equip_current and cause_originale != "Non spécifié":
-                    cause_traduite = translate_cause_to_text(cause_originale, equip_current)
-                    
-                    if cause_traduite != cause_originale:
-                        st.markdown("**🔧 Cause d'indisponibilité traduite :**")
-                        st.info(f"**Original :** {cause_originale}\n\n**Traduit :** {cause_traduite}")
-                    else:
-                        st.markdown("**🔧 Cause d'indisponibilité :**")
-                        st.info(f"**Cause :** {cause_originale}")
-                else:
-                    st.markdown("**🔧 Cause d'indisponibilité :**")
-                    st.info(f"**Cause :** {cause_originale}")
-                    st.rerun()
-
-        st.markdown("---")  
-        st.markdown("### 💬 Ajouter un Commentaire")
-        st.caption("Ajouter un commentaire informatif pour ce bloc sans affecter les calculs de disponibilité.")
-
-        with st.form(f"add_comment_{bloc_id}"):
-            comment_operator = st.text_input(
-                "Créé par",
-                value="",
-                placeholder="ex: Jean Dupont",
-                help="Identifiez la personne qui ajoute ce commentaire.",
-            )
-            
-            comment_text = st.text_area(
-                "Commentaire",
-                placeholder="Décrivez l'événement, l'observation ou toute information pertinente pour cette période...",
-                help="Ce commentaire sera visible dans l'onglet 'Gestion des Commentaires'.",
-                height=120
-            )
-            
-            submit_comment = st.form_submit_button("💬 Ajouter le commentaire", type="primary")
-            
-            if submit_comment:
-                comment_txt = comment_text.strip()
-                if len(comment_txt) < 5:
-                    st.error("❌ Le commentaire doit contenir au moins 5 caractères.")
-                else:
-                    try:
-                        # Récupérez le site et l'équipement depuis la session
-                        site = st.session_state.get("current_site", "")
-                        equipement = st.session_state.get("current_equip", "")
-                        
-                        # Utilisez directement les dates du bloc sélectionné
-                        success = create_annotation(
-                            site=site,
-                            equip=equipement,
-                            start_dt=selected_row["start"],
-                            end_dt=selected_row["end"],
-                            annotation_type="commentaire",
-                            comment=comment_txt,
-                            user=comment_operator.strip() or "ui",
-                            cascade=False
-                        )
-                        
-                        if success:
-                            st.success(f"✅ Commentaire ajouté avec succès !")
-                            st.balloons()
-                            st.rerun()
-                        else:
-                            st.error("❌ Échec de l'ajout du commentaire.")
-                        
-                    except Exception as exc:
-                        st.error(f"❌ Impossible d'ajouter le commentaire : {exc}")
-    with st.expander("⚡ Exclusion rapide des données manquantes", expanded=False):
-        month_default = datetime.now(ZoneInfo("Europe/Zurich")).date().replace(day=1)
-        month_candidates = [
-            ts.to_pydatetime().date() for ts in pd.date_range(end=month_default, periods=12, freq="MS")
-        ]
-        month_candidates.reverse()
-        default_index = month_candidates.index(month_default) if month_default in month_candidates else 0
-        target_month = st.selectbox(
-            "Mois concerné",
-            options=month_candidates,
-            index=default_index,
-            format_func=lambda d: d.strftime("%Y-%m"),
-            key="timeline_missing_month_picker",
-            help="Choisissez un mois pour exclure automatiquement toutes les données manquantes.",
-        )
-
-        month_start = target_month.replace(day=1)
-        if month_start.month == 12:
-            next_month = month_start.replace(year=month_start.year + 1, month=1)
-        else:
-            next_month = month_start.replace(month=month_start.month + 1)
-
-        st.markdown("**Sites concernés par l'exclusion automatique**")
-        exclusion_sites = ["AC", "DC1", "DC2", "PDC1", "PDC2", "PDC3", "PDC4", "PDC5", "PDC6"]
-        site_columns = st.columns(3)
-        selected_sites = []
-        for idx, site_label in enumerate(exclusion_sites):
-            col = site_columns[idx % len(site_columns)]
-            if col.checkbox(site_label, key=f"timeline_missing_site_{site_label.lower()}"):
-                selected_sites.append(site_label)
-
-        st.session_state["timeline_missing_selected_sites"] = selected_sites
-
-        default_comment = f"Exclusion automatique données manquantes {month_start.strftime('%Y-%m')}"
-        bulk_comment = st.text_input(
-            "Commentaire appliqué",
-            value=default_comment,
-            key="timeline_missing_month_comment",
-            help="Le commentaire sera répliqué sur chaque exclusion créée.",
-        )
-        bulk_user = st.text_input(
-            "Créé par",
-            placeholder="Votre nom",
-            key="timeline_missing_month_user",
-        )
-
-        col_apply_available, col_apply_unavailable = st.columns(2)
-        trigger_available = col_apply_available.button(
-            "✅ Exclure comme disponible",
-            key="timeline_missing_exclude_available",
-            use_container_width=True,
-        )
-        trigger_unavailable = col_apply_unavailable.button(
-            "❌ Exclure comme indisponible",
-            key="timeline_missing_exclude_unavailable",
-            use_container_width=True,
-        )
-
-        if trigger_available or trigger_unavailable:
-            if not selected_sites:
-                st.warning("Sélectionnez au moins un équipement à traiter.")
-            else:
-                site_scope = st.session_state.get("current_site")
-                if not site_scope:
-                    st.error(
-                        "Sélectionnez un site spécifique dans les filtres avant d'utiliser l'exclusion automatique."
-                    )
-                else:
-                    comment_txt = (bulk_comment or "").strip()
-                    if len(comment_txt) < 5:
-                        st.error("Le commentaire doit contenir au moins 5 caractères.")
-                    else:
-                        user_txt = (bulk_user or "").strip()
-                        start_dt = datetime.combine(month_start, time.min)
-                        end_dt = datetime.combine(next_month, time.min)
-                        new_status = 1 if trigger_available else 0
-                        status_label = "disponible" if new_status == 1 else "indisponible"
-
-                        available_equips = {s.upper() for s in get_equipments(MODE_EQUIPMENT, site_scope) or []}
-                        available_pdc = {s.upper() for s in get_equipments(MODE_PDC, site_scope) or []}
-
-                        total_created = 0
-                        total_candidates = 0
-                        info_messages: List[str] = []
-                        error_messages: List[str] = []
-
-                        with st.spinner("Application des exclusions automatiques..."):
-                            for equip_label in selected_sites:
-                                equip_upper = equip_label.upper()
-                                mode = MODE_PDC if equip_upper.startswith("PDC") else MODE_EQUIPMENT
-
-                                if mode == MODE_PDC and equip_upper not in available_pdc:
-                                    info_messages.append(
-                                        f"{equip_label}: aucun point de charge correspondant pour le site sélectionné."
-                                    )
-                                    continue
-
-                                if mode == MODE_EQUIPMENT and equip_upper not in available_equips:
-                                    info_messages.append(
-                                        f"{equip_label}: équipement indisponible sur le site sélectionné."
-                                    )
-                                    continue
-
-                                created, candidates, errors = _bulk_exclude_missing_blocks(
-                                    site=site_scope,
-                                    equip=equip_label,
-                                    start_dt=start_dt,
-                                    end_dt=end_dt,
-                                    new_status=new_status,
-                                    comment=comment_txt,
-                                    user=user_txt or None,
-                                )
-
-                                total_created += created
-                                total_candidates += candidates
-                                error_messages.extend(errors)
-
-                                if candidates == 0:
-                                    info_messages.append(
-                                        f"{equip_label}: aucune donnée manquante sur la période sélectionnée."
-                                    )
-
-                        if total_created > 0:
-                            st.success(
-                                f"✅ {total_created} exclusion{'s' if total_created > 1 else ''} créée{'s' if total_created > 1 else ''}"
-                                f" et marquée{'s' if total_created > 1 else ''} comme {status_label}."
-                            )
-
-                            if info_messages:
-                                st.info("\n".join(info_messages))
-
-                            if error_messages:
-                                st.warning("\n".join(error_messages))
-
-                            st.balloons()
-                            st.rerun()
-                        else:
-                            if info_messages:
-                                st.info("\n".join(info_messages))
-                            if error_messages:
-                                st.error("\n".join(error_messages))
-                            if not info_messages and not error_messages:
-                                st.info(
-                                    "Aucune donnée manquante à exclure pour la période et la sélection indiquées."
-                                )
-def render_exclusions_tab():
-    mode = get_current_mode()
-    st.header("🚫 Gestion des exclusions")
-
-    st.markdown(
-        """
-        Les exclusions actives sont appliquées directement sur les blocs de disponibilité.
-        Utilisez la timeline pour créer de nouvelles exclusions et ce panneau pour consulter
-        ou lever celles qui sont encore actives.
-        """
-    )
-
-    st.subheader("🔒 Exclusions actives")
-    df_active = get_block_exclusions(active_only=True, limit=200)
-    if df_active.empty:
-        st.success("✅ Aucune exclusion active dans la base de données.")
-    else:
-        status_map = {1: "Disponible", 0: "Indisponible", -1: "Donnée manquante"}
-
-        def _format_applied_at(value: Any) -> str:
-            timestamp = pd.to_datetime(value, errors="coerce")
-            if pd.isna(timestamp):
-                return "—"
-            return timestamp.strftime("%Y-%m-%d %H:%M")
-
-        def _format_duration(delta: Optional[pd.Timedelta]) -> str:
-            if delta is None or pd.isna(delta):
-                return "—"
-            total_minutes = max(int(delta.total_seconds() // 60), 0)
-            days, remainder = divmod(total_minutes, 1440)
-            hours, minutes = divmod(remainder, 60)
-            parts: List[str] = []
-            if days:
-                parts.append(f"{days} j")
-            if hours:
-                parts.append(f"{hours} h")
-            if minutes or not parts:
-                parts.append(f"{minutes} min")
-            return " ".join(parts)
-
-        now_ts = pd.Timestamp.now(tz='UTC')
-        applied_ts = pd.to_datetime(df_active["applied_at"], errors="coerce", utc=True)
-        metadata_lookup = _fetch_blocks_metadata(df_active[["table_name", "bloc_id"]])
-
-        def _format_new_status(value: Any) -> str:
-            if value is None or (isinstance(value, float) and pd.isna(value)):
-                return "—"
-            try:
-                return status_map[int(value)]
-            except (TypeError, ValueError, KeyError):
-                return str(value)
-
-        def _format_block_datetime(value: Any) -> str:
-            if value is None or (isinstance(value, float) and pd.isna(value)):
-                return "—"
-            ts = _ensure_paris_timestamp(value)
-            if ts is None:
-                ts = pd.to_datetime(value, errors="coerce")
-            if ts is None or pd.isna(ts):
-                return "—"
-            return ts.strftime("%Y-%m-%d %H:%M")
-
-        new_status_raw: List[Optional[Any]] = []
-        start_raw: List[Optional[Any]] = []
-        end_raw: List[Optional[Any]] = []
-
-        for row in df_active.itertuples():
-            meta = metadata_lookup.get((row.table_name, int(row.bloc_id)))
-            if meta:
-                new_status_raw.append(meta.get("status"))
-                start_raw.append(meta.get("date_debut"))
-                end_raw.append(meta.get("date_fin"))
-            else:
-                new_status_raw.append(None)
-                start_raw.append(None)
-                end_raw.append(None)
-
-        df_active_display = pd.DataFrame(
-            {
-                "Sélection": [False] * len(df_active),
-                "ID exclusion": df_active["id"].astype(int),
-                "Table": df_active["table_name"],
-                "Bloc": df_active["bloc_id"].astype(int),
-                "Statut initial": df_active["previous_status"].map(status_map).fillna("Inconnu"),
-                "Nouveau statut": [_format_new_status(value) for value in new_status_raw],
-                "Date début": [_format_block_datetime(value) for value in start_raw],
-                "Date fin": [_format_block_datetime(value) for value in end_raw],
-                "Commentaire": df_active["exclusion_comment"].fillna("—"),
-                "Appliquée par": df_active["applied_by"].fillna("—"),
-                "Appliquée le": applied_ts.map(_format_applied_at),
-                "Actif depuis": (now_ts - applied_ts).map(_format_duration),
-            }
-        )
-
-        st.caption("Sélectionnez une ou plusieurs exclusions pour afficher les détails et les lever en lot.")
-        edited_active = st.data_editor(
-            df_active_display,
-            hide_index=True,
-            num_rows="fixed",
-            column_config={
-                "Sélection": st.column_config.CheckboxColumn(
-                    "Sélection",
-                    help="Cochez pour inclure l'exclusion dans la sélection courante.",
-                    default=False,
-                ),
-                "Commentaire": st.column_config.TextColumn(disabled=True),
-                "Appliquée par": st.column_config.TextColumn(disabled=True),
-                "Appliquée le": st.column_config.TextColumn(disabled=True),
-                "Actif depuis": st.column_config.TextColumn(disabled=True),
-                "Nouveau statut": st.column_config.TextColumn(disabled=True),
-                "Date début": st.column_config.TextColumn(disabled=True),
-                "Date fin": st.column_config.TextColumn(disabled=True),
-            },
-            disabled=[
-                "ID exclusion",
-                "Table",
-                "Bloc",
-                "Statut initial",
-                "Nouveau statut",
-                "Date début",
-                "Date fin",
-            ],
-            key="active_exclusions_editor",
-        )
-
-        selected_ids = [
-            int(row["ID exclusion"])
-            for _, row in edited_active.iterrows()
-            if bool(row.get("Sélection"))
-        ]
-
-        if selected_ids:
-            st.info(
-                f"{len(selected_ids)} exclusion{'s' if len(selected_ids) > 1 else ''} sélectionnée{'s' if len(selected_ids) > 1 else ''}."
-            )
-
-            selected_details = df_active[df_active["id"].isin(selected_ids)]
-            with st.expander("Détails des exclusions sélectionnées", expanded=False):
-                for _, selected in selected_details.sort_values("applied_at", ascending=False).iterrows():
-                    meta = metadata_lookup.get(
-                        (selected["table_name"], int(selected["bloc_id"]))
-                    )
-                    st.markdown(
-                        f"**Bloc #{int(selected['bloc_id'])} · {selected['table_name']}**"
-                    )
-                    st.write(
-                        {
-                            "ID": int(selected["id"]),
-                            "Statut initial": status_map.get(int(selected.get("previous_status", -1)), "Inconnu"),
-                            "Nouveau statut": _format_new_status(meta.get("status") if meta else None),
-                            "Commentaire": selected.get("exclusion_comment") or "—",
-                            "Appliquée par": selected.get("applied_by") or "—",
-                            "Appliquée le": _format_applied_at(selected.get("applied_at")),
-                            "Date début": _format_block_datetime(meta.get("date_debut") if meta else None),
-                            "Date fin": _format_block_datetime(meta.get("date_fin") if meta else None),
-                        }
-                    )
-
-        with st.form("bulk_release_form"):
-            release_operator = st.text_input(
-                "Opérateur (historisation)",
-                placeholder="ex: Jean Dupont",
-            )
-            release_comment = st.text_area(
-                "Commentaire de réactivation",
-                placeholder="Expliquez pourquoi les exclusions sélectionnées sont levées",
-            )
-            submit_bulk_release = st.form_submit_button("♻️ Lever les exclusions sélectionnées", disabled=not selected_ids)
-
-        if submit_bulk_release:
-            comment_txt = release_comment.strip()
-            if not selected_ids:
-                st.warning("Veuillez sélectionner au moins une exclusion active à lever.")
-            elif len(comment_txt) < 5:
-                st.error("❌ Le commentaire doit contenir au moins 5 caractères.")
-            else:
-                successes = 0
-                errors: List[str] = []
-                for exclusion_id in selected_ids:
-                    row = df_active[df_active["id"] == exclusion_id].iloc[0]
-                    try:
-                        release_block_exclusion(
-                            table_name=str(row["table_name"]),
-                            block_id=int(row["bloc_id"]),
-                            user=release_operator.strip() or None,
-                            comment=comment_txt,
-                        )
-                    except ExclusionError as exc:
-                        errors.append(f"Exclusion #{exclusion_id}: {exc}")
-                    else:
-                        successes += 1
-
-                if successes:
-                    st.success(
-                        f"✅ {successes} exclusion{'s' if successes > 1 else ''} levée{'s' if successes > 1 else ''} avec succès."
-                    )
-                if errors:
-                    st.error("\n".join(f"❌ {message}" for message in errors))
-
-                if successes:
-                    st.rerun()
-    st.subheader("🕒 Historique récent")
-    df_history = get_block_exclusions(active_only=False, limit=200)
-    if df_history.empty:
-        st.info("ℹ️ Aucun historique disponible.")
-    else:
-        history = df_history.copy()
-        history["Statut"] = history["released_at"].apply(lambda v: "✅ Active" if pd.isna(v) else "❌ Levée")
-        status_map = {1: "Disponible", 0: "Indisponible", -1: "Donnée manquante"}
-        history["Statut initial"] = history["previous_status"].map(status_map).fillna("Inconnu")
-        
-        # ➕ Conversion en heure de Zurich
-        history["Appliquée le"] = (
-            pd.to_datetime(history["applied_at"], utc=True)
-            .dt.tz_convert('Europe/Zurich')
-            .dt.strftime("%Y-%m-%d %H:%M")
-        )
-        history["Levée le"] = (
-            pd.to_datetime(history["released_at"], utc=True)
-            .dt.tz_convert('Europe/Zurich')
-            .dt.strftime("%Y-%m-%d %H:%M")
-        )
-        
-        display_cols = [
-            "id",
-            "table_name",
-            "bloc_id",
-            "Statut",
-            "Statut initial",
-            "exclusion_comment",
-            "applied_by",
-            "Appliquée le",
-            "released_by",
-            "Levée le",
-            "release_comment",
-        ]
-        history = history[display_cols]
-        st.dataframe(
-            history,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "id": st.column_config.NumberColumn("ID", width="small"),
-                "table_name": st.column_config.TextColumn("Table", width="medium"),
-                "bloc_id": st.column_config.NumberColumn("Bloc", width="small"),
-                "Statut initial": st.column_config.TextColumn("Statut initial", width="medium"),
-                "exclusion_comment": st.column_config.TextColumn("Commentaire", width="large"),
-                "applied_by": st.column_config.TextColumn("Appliquée par", width="medium"),
-                "released_by": st.column_config.TextColumn("Levée par", width="medium"),
-                "release_comment": st.column_config.TextColumn("Commentaire de levée", width="large"),
-            },
-        )
-
-def render_comments_tab():
-    """Affiche l'onglet de gestion des commentaires."""
-    st.header("💬 Gestion des Commentaires")
-    
-    st.markdown("""
-    Les **commentaires** sont des annotations informatives qui n'affectent pas 
-    le calcul de disponibilité mais permettent de documenter des événements ou observations.
-    """)
-    
-    st.divider()
-    
-    st.subheader("📋 Commentaires Existants")
-    
-    df_comments = get_annotations(annotation_type="commentaire", limit=200)
-    
-    if df_comments.empty:
-        st.info("ℹ️ Aucun commentaire enregistré pour le moment.")
-    else:
-        df_display = df_comments.copy()
-        df_display["Période"] = df_display.apply(
-            lambda r: f"{pd.to_datetime(r['date_debut']).strftime('%Y-%m-%d %H:%M')} → {pd.to_datetime(r['date_fin']).strftime('%Y-%m-%d %H:%M')}",
-            axis=1
-        )
-        df_display["Créé le"] = pd.to_datetime(df_display["created_at"]).dt.strftime("%Y-%m-%d %H:%M")
-        df_display["Statut"] = df_display["actif"].map({1: "✅ Actif", 0: "❌ Inactif"})
-        
-        columns_config = [
-            ("id", "ID", 0.8),
-            ("site", "Site", 1.1),
-            ("equipement_id", "Équipement", 1.2),
-            ("Période", "Période", 1.8),
-            ("commentaire", "Commentaire", 2.5),
-            ("Statut", "Statut", 1.0),
-            ("created_by", "Créé par", 1.2),
-            ("Créé le", "Créé le", 1.3),
-        ]
-
-        st.caption("Cliquez sur 🗑️ pour supprimer un commentaire directement depuis la liste.")
-        render_inline_delete_table(
-            df_display,
-            column_settings=columns_config,
-            key_prefix="comment",
-            delete_handler=delete_annotation,
-            success_message="✅ Commentaire #{id} supprimé !",
-            error_message="❌ Échec de suppression pour le commentaire #{id}."
-        )
-        
-        st.subheader("✏️ Éditer un Commentaire")
-        selected_id = st.number_input(
-            "ID du commentaire à éditer",
-            min_value=0,
-            value=0,
-            step=1,
-            help="Entrez l'ID du commentaire à modifier"
-        )
-        
-        if selected_id > 0:
-            selected_comment = df_comments[df_comments["id"] == selected_id]
-            
-            if selected_comment.empty:
-                st.error(f"❌ Aucun commentaire trouvé avec l'ID {selected_id}")
-            else:
-                comment_info = selected_comment.iloc[0]
-                current_text = comment_info["commentaire"]
-                
-                st.info(f"""
-                **Commentaire #{selected_id}**  
-                📍 Site: {comment_info['site']} | Équipement: {comment_info['equipement_id']}  
-                📅 Période: {pd.to_datetime(comment_info['date_debut']).strftime('%Y-%m-%d %H:%M')} → {pd.to_datetime(comment_info['date_fin']).strftime('%Y-%m-%d %H:%M')}  
-                👤 Créé par: {comment_info['created_by']}
-                """)
-                
-                new_text = st.text_area(
-                    "Nouveau texte du commentaire",
-                    value=current_text,
-                    height=150,
-                    help="Modifiez le texte du commentaire"
-                )
-                
-                col1, col2 = st.columns(2)
-
-                with col1:
-                    if st.button("💾 Enregistrer les modifications", type="primary", use_container_width=True):
-                        if not new_text :
-                            st.error("❌ Veuillez mettre un commentaire.")
-                        else:
-                            if update_annotation_comment(selected_id, new_text.strip()):
-                                st.success(f"✅ Commentaire #{selected_id} mis à jour !")
-                                st.rerun()
-                
-                with col2:
-                    is_active = comment_info["actif"] == 1
-                    if is_active:
-                        if st.button("❌ Désactiver", use_container_width=True):
-                            if toggle_annotation(selected_id, False):
-                                st.warning(f"⚠️ Commentaire #{selected_id} désactivé !")
-                                st.rerun()
-                    else:
-                        if st.button("✅ Activer", use_container_width=True):
-                            if toggle_annotation(selected_id, True):
-                                st.success(f"✅ Commentaire #{selected_id} activé !")
-                                st.rerun()
-
-                st.caption("🗑️ Utilisez la liste ci-dessus pour supprimer un commentaire.")
-
-
-
-@dataclass
-class EquipmentReportDetail:
-    """Structure contenant les données préparées pour l'affichage du rapport."""
-
-    name: str
-    summary: Optional[Dict[str, str]]
-    unavailable_table: pd.DataFrame
-    missing_table: pd.DataFrame
-    causes_table: pd.DataFrame
-    daily_table: pd.DataFrame
-    unavailable_minutes: int = 0
-    missing_minutes: int = 0
-    excluded_events: int = 0
-
-
-def _prepare_report_summary(
-    report_data: Dict[str, pd.DataFrame],
-    equipments: List[str],
-) -> Tuple[pd.DataFrame, Dict[str, EquipmentReportDetail], Dict[str, float]]:
-    """Construit les différentes vues utilisées dans l'onglet rapport."""
-
-    overview_rows: List[Dict[str, object]] = []
-    equipment_details: Dict[str, EquipmentReportDetail] = {}
-
-    total_unavailable_minutes = 0
-    total_missing_minutes = 0
-    total_unavailable_events = 0
-    total_missing_events = 0
-    total_exclusions = 0
-    availability_values: List[float] = []
-
-    jours_fr = {
-        'Monday': 'Lundi',
-        'Tuesday': 'Mardi',
-        'Wednesday': 'Mercredi',
-        'Thursday': 'Jeudi',
-        'Friday': 'Vendredi',
-        'Saturday': 'Samedi',
-        'Sunday': 'Dimanche'
-    }
-
-    for equip in equipments:
-        df = report_data.get(equip)
-
-        if df is None or df.empty:
-            overview_rows.append({
-                "Équipement": equip,
-                "Disponibilité (%)": 0.0,
-                "Durée Totale": "0 minute",
-                "Périodes d'indisponibilité": 0,
-                "Durée indisponible": format_minutes(0),
-                "Périodes de données manquantes": 0,
-                "Durée manquante": format_minutes(0)
-            })
-
-            equipment_details[equip] = EquipmentReportDetail(
-                name=equip,
-                summary=None,
-                unavailable_table=pd.DataFrame(columns=["ID", "Date", "Jour", "Début", "Fin", "Durée", "Cause", "Exclu"]),
-                missing_table=pd.DataFrame(columns=["ID", "Date", "Début", "Fin", "Durée", "Exclu"]),
-                causes_table=pd.DataFrame(columns=["Cause", "Occurrences", "Durée (min)", "Durée Totale"]),
-                daily_table=pd.DataFrame(columns=["Date", "Jour", "Nb Périodes", "Durée Totale", "Première Heure", "Dernière Heure", "% Journée"])
-            )
-            continue
-
-        summary_row = df[df["ID"] == "RÉSUMÉ"].copy()
-        detail_rows = df[df["ID"] != "RÉSUMÉ"].copy()
-
-        summary_dict: Optional[Dict[str, str]] = None
-        availability_pct = 0.0
-
-        if not summary_row.empty:
-            summary = summary_row.iloc[0]
-            pct_match = re.search(r"(\d+\.?\d*)%", str(summary["Statut"]))
-            availability_pct = float(pct_match.group(1)) if pct_match else 0.0
-            availability_values.append(availability_pct)
-
-            summary_dict = {
-                "Disponibilité": str(summary["Statut"]),
-                "Durée": str(summary["Durée"]),
-                "Site": str(summary["Site"]),
-                "Périodes": str(len(detail_rows))
-            }
-
-        if "Durée_Minutes" in detail_rows.columns:
-            detail_rows["Durée_Minutes"] = detail_rows["Durée_Minutes"].fillna(0).astype(int)
-        else:
-            detail_rows["Durée_Minutes"] = 0
-
-        unavailable = detail_rows[detail_rows["ID"].str.startswith("IND-")].copy()
-        missing = detail_rows[detail_rows["ID"].str.startswith("MISS-")].copy()
-
-        unavailable_minutes = int(unavailable["Durée_Minutes"].sum()) if not unavailable.empty else 0
-        missing_minutes = int(missing["Durée_Minutes"].sum()) if not missing.empty else 0
-        excluded_events = int(
-            (unavailable.get("Exclu", pd.Series(dtype=str)) == "✅ Oui").sum() +
-            (missing.get("Exclu", pd.Series(dtype=str)) == "✅ Oui").sum()
-        )
-
-        overview_rows.append({
-            "Équipement": equip,
-            "Disponibilité (%)": round(availability_pct, 2),
-            "Durée Totale": summary_dict["Durée"] if summary_dict else "0 minute",
-            "Périodes d'indisponibilité": len(unavailable),
-            "Durée indisponible": format_minutes(unavailable_minutes),
-            "Périodes de données manquantes": len(missing),
-            "Durée manquante": format_minutes(missing_minutes)
-        })
-
-        def _with_dates(df_source: pd.DataFrame) -> pd.DataFrame:
-            if df_source.empty:
-                return df_source
-            df_display = df_source.copy()
-            df_display["Date"] = pd.to_datetime(df_display["Début"]).dt.strftime("%Y-%m-%d")
-            df_display["Jour"] = pd.to_datetime(df_display["Début"]).dt.day_name().map(jours_fr)
-            return df_display
-
-        unavailable_display = _with_dates(unavailable)
-        if not unavailable_display.empty:
-            unavailable_display = unavailable_display.sort_values("Durée_Minutes", ascending=False)
-            unavailable_display = unavailable_display[[
-                "ID", "Date", "Jour", "Début", "Fin", "Durée", "Cause Traduite", "Exclu"
-            ]].rename(columns={"Cause Traduite": "Cause"})
-
-        missing_display = _with_dates(missing)
-        if not missing_display.empty:
-            missing_display = missing_display.sort_values("Durée_Minutes", ascending=False)
-            missing_display = missing_display[["ID", "Date", "Début", "Fin", "Durée", "Exclu"]]
-
-        if not unavailable.empty:
-            causes_table = (
-                unavailable.groupby("Cause Traduite", dropna=False)
-                .agg(Occurrences=("ID", "count"), Durée_Minutes=("Durée_Minutes", "sum"))
-                .reset_index()
-                .sort_values(["Occurrences", "Durée_Minutes"], ascending=[False, False])
-            )
-            causes_table["Durée Totale"] = causes_table["Durée_Minutes"].apply(lambda x: format_minutes(int(x)))
-            causes_table = causes_table.rename(columns={"Cause Traduite": "Cause", "Durée_Minutes": "Durée (min)"})
-            causes_table = causes_table[["Cause", "Occurrences", "Durée (min)", "Durée Totale"]].head(5)
-        else:
-            causes_table = pd.DataFrame(columns=["Cause", "Occurrences", "Durée (min)", "Durée Totale"])
-
-        if not unavailable.empty:
-            daily_input = unavailable.rename(columns={"Début": "date_debut", "Fin": "date_fin"})
-            daily_table = analyze_daily_unavailability(daily_input)
-        else:
-            daily_table = pd.DataFrame(columns=["Date", "Jour", "Nb Périodes", "Durée Totale", "Première Heure", "Dernière Heure", "% Journée"])
-
-        equipment_details[equip] = EquipmentReportDetail(
-            name=equip,
-            summary=summary_dict,
-            unavailable_table=unavailable_display,
-            missing_table=missing_display,
-            causes_table=causes_table,
-            daily_table=daily_table,
-            unavailable_minutes=unavailable_minutes,
-            missing_minutes=missing_minutes,
-            excluded_events=excluded_events
-        )
-
-        total_unavailable_minutes += unavailable_minutes
-        total_missing_minutes += missing_minutes
-        total_unavailable_events += len(unavailable)
-        total_missing_events += len(missing)
-        total_exclusions += excluded_events
-
-    overview_df = pd.DataFrame(overview_rows)
-
-    totals = {
-        "average_availability": round(sum(availability_values) / len(availability_values), 2) if availability_values else 0.0,
-        "unavailable_events": total_unavailable_events,
-        "unavailable_minutes": total_unavailable_minutes,
-        "missing_events": total_missing_events,
-        "missing_minutes": total_missing_minutes,
-        "excluded_events": total_exclusions
-    }
-
-    return overview_df, equipment_details, totals
-
-
-def _resolve_site_label(site: str) -> str:
-    site_suffix = site.split("_")[-1] if site else ""
-    site_name = mapping_sites.get(site_suffix)
-    return f"{site} – {site_name}" if site_name else site
-
-
-def _filter_pdc_summary_for_pdf(summary: Optional[pd.DataFrame]) -> pd.DataFrame:
-    columns = [
-        "Équipement",
-        "Disponibilité Brute (%)",
-        "Disponibilité Avec Exclusions (%)",
-        "Durée Totale",
-        "Temps Disponible",
-        "Temps Indisponible",
-        "Jours avec des données",
-    ]
-    if summary is None or summary.empty:
-        return pd.DataFrame(columns=columns)
-
-    df = summary.copy()
-    df["Équipement"] = df["Équipement"].astype(str)
-    mask = df["Équipement"].str.upper().str.startswith("PDC")
-    filtered = df.loc[mask].reset_index(drop=True)
-    if filtered.empty:
-        return pd.DataFrame(columns=columns)
-    return filtered
-
-
-def _compute_pdf_metrics(
-    combined_blocks: pd.DataFrame,
-    equipment_count: int,
-    start_dt: datetime,
-    end_dt: datetime,
-) -> Tuple[Dict[str, Any], pd.DataFrame]:
-    window_minutes = int((end_dt - start_dt).total_seconds() // 60)
-    total_window = window_minutes * max(equipment_count, 1)
-
-    if combined_blocks is None or combined_blocks.empty:
-        metrics = {
-            "availability_pct": 0.0,
-            "downtime_minutes": 0,
-            "reference_minutes": 0,
-            "coverage_pct": 0.0,
-            "window_minutes": total_window,
-            "missing_minutes": 0,
-        }
-        summary_df = pd.DataFrame(
-            columns=["Condition", "Durée_Minutes", "Temps_Analysé_Minutes"]
-        )
-        return metrics, summary_df
-
-    stats_with_exclusions = calculate_availability(
-        combined_blocks, include_exclusions=True
-    )
-    stats_raw = calculate_availability(combined_blocks, include_exclusions=False)
-
-    reference_minutes = int(stats_with_exclusions.get("effective_minutes", 0) or 0)
-    downtime_minutes = int(stats_with_exclusions.get("unavailable_minutes", 0) or 0)
-    missing_minutes = int(stats_raw.get("missing_minutes", 0) or 0)
-
-    coverage_pct = (
-        (reference_minutes / total_window * 100)
-        if total_window and reference_minutes
-        else 0.0
-    )
-
-    metrics: Dict[str, Any] = {
-        "availability_pct": float(
-            stats_with_exclusions.get("pct_available", 0.0) or 0.0
-        ),
-        "downtime_minutes": downtime_minutes,
-        "reference_minutes": reference_minutes,
-        "coverage_pct": float(coverage_pct),
-        "window_minutes": total_window,
-        "missing_minutes": missing_minutes,
-        "downtime_occurrences": 0,
-    }
-
-    summary_rows: List[Dict[str, Any]] = []
-    if downtime_minutes:
-        summary_rows.append(
-            {
-                "Condition": "Indisponibilités mesurées",
-                "Durée_Minutes": downtime_minutes,
-                "Temps_Analysé_Minutes": reference_minutes,
-            }
-        )
-    if missing_minutes:
-        summary_rows.append(
-            {
-                "Condition": "Données manquantes",
-                "Durée_Minutes": missing_minutes,
-                "Temps_Analysé_Minutes": total_window,
-            }
-        )
-
-    summary_df = (
-        pd.DataFrame(summary_rows)
-        if summary_rows
-        else pd.DataFrame(
-            columns=["Condition", "Durée_Minutes", "Temps_Analysé_Minutes"]
-        )
-    )
-    return metrics, summary_df
-
-
-def _build_site_pdf_report(
-    site: str,
-    start_dt: datetime,
-    end_dt: datetime,
-    statistics: Optional[Dict[str, Any]] = None,
-) -> Optional[SiteReport]:
-    equipment_summary = get_equipment_summary(
-        start_dt, end_dt, site=site, mode=MODE_EQUIPMENT
-    )
-    pdc_summary = _filter_pdc_summary_for_pdf(
-        get_equipment_summary(start_dt, end_dt, site=site, mode=MODE_PDC)
-    )
-
-    try:
-        equipment_blocks = load_filtered_blocks(
-            start_dt, end_dt, site, None, mode=MODE_EQUIPMENT
-        )
-    except Exception:
-        equipment_blocks = pd.DataFrame()
-
-    try:
-        pdc_blocks = load_filtered_blocks(
-            start_dt, end_dt, site, None, mode=MODE_PDC
-        )
-    except Exception:
-        pdc_blocks = pd.DataFrame()
-
-    frames: List[pd.DataFrame] = []
-    for df in (equipment_blocks, pdc_blocks):
-        if df is not None and not df.empty:
-            frames.append(df.copy())
-
-    if frames:
-        combined_blocks = pd.concat(frames, ignore_index=True)
-    else:
-        combined_blocks = pd.DataFrame(
-            columns=["equipement_id", "duration_minutes", "est_disponible", "cause"]
-        )
-
-    if not combined_blocks.empty and "equipement_id" in combined_blocks.columns:
-        equipment_count = combined_blocks["equipement_id"].astype(str).nunique()
-    else:
-        equipment_count = 0
-        if not equipment_summary.empty:
-            equipment_count += equipment_summary["Équipement"].astype(str).nunique()
-        if not pdc_summary.empty:
-            equipment_count += pdc_summary["Équipement"].astype(str).nunique()
-
-    metrics, summary_df = _compute_pdf_metrics(
-        combined_blocks, equipment_count, start_dt, end_dt
-    )
-
-    if statistics:
-        stats_metrics = dict(statistics.get("metrics") or {})
-        stats_summary = statistics.get("summary_df")
-
-        if isinstance(stats_summary, pd.DataFrame):
-            summary_df = stats_summary.copy()
-        else:
-            summary_df = pd.DataFrame(
-                columns=["Condition", "Durée_Minutes", "Temps_Analysé_Minutes"]
-            )
-
-        for key, value in metrics.items():
-            stats_metrics.setdefault(key, value)
-
-        stats_metrics["downtime_occurrences"] = int(
-            stats_metrics.get("downtime_occurrences", 0) or 0
-        )
-        metrics = stats_metrics
-
-    site_label = _resolve_site_label(site)
-
-    return SiteReport(
-        site=site,
-        site_label=site_label,
-        metrics=metrics,
-        summary_df=summary_df,
-        equipment_summary=equipment_summary,
-        raw_blocks=combined_blocks,
-        pdc_summary=pdc_summary,
-    )
-
-
-def _render_statistics_pdf_export(
-    site: str,
-    site_label: str,
-    stats: Dict[str, Any],
-    start_dt: datetime,
-    end_dt: datetime,
-) -> None:
-    export_state = st.session_state.setdefault("statistics_pdf_state", {})
-    site_state: Dict[str, Any] = export_state.setdefault(site, {})
-
-    context = (site, start_dt.isoformat(), end_dt.isoformat())
-    if site_state.get("context") != context:
-        site_state.clear()
-        site_state["context"] = context
-
-    pdf_title = f"Rapport de disponibilité – {site_label}"
-
-    generate_key = f"{site}_stats_pdf_generate"
-    download_key = f"{site}_stats_pdf_download"
-
-    if st.button("📄 Générer le PDF", key=generate_key):
-        try:
-            with st.spinner("📦 Génération du PDF en cours..."):
-                site_report = _build_site_pdf_report(
-                    site,
-                    start_dt,
-                    end_dt,
-                    statistics=stats,
-                )
-                if site_report is None:
-                    raise ValueError("Aucune donnée à exporter")
-                pdf_bytes = generate_statistics_pdf(
-                    [site_report],
-                    start_dt,
-                    end_dt,
-                    title=pdf_title,
-                )
-            file_name = (
-                f"vue_statistique_{site}_{start_dt:%Y%m%d}_{end_dt:%Y%m%d}.pdf"
-            ).replace(" ", "_")
-            site_state["bytes"] = pdf_bytes
-            site_state["filename"] = file_name
-            st.success(
-                "✅ Rapport PDF généré avec succès. Utilisez le bouton ci-dessous pour le télécharger."
-            )
-        except ValueError as exc:
-            st.warning(f"⚠️ {exc}")
-        except Exception as exc:  # pragma: no cover - affichage utilisateur
-            logger.exception("Erreur lors de la génération du PDF statistique")
-            st.error(f"❌ Impossible de générer le rapport PDF : {exc}")
-
-    if site_state.get("bytes"):
-        st.download_button(
-            "⬇️ Télécharger le PDF",
-            data=site_state["bytes"],
-            file_name=site_state.get("filename", "vue_statistique.pdf"),
-            mime="application/pdf",
-            key=download_key,
-        )
-
-
-def _render_equipment_detail(detail: EquipmentReportDetail) -> None:
-    """Affiche la section détaillée d'un équipement."""
-
-    icons = {"AC": "⚡", "DC1": "🔋", "DC2": "🔋"}
-    st.markdown(f"#### {icons.get(detail.name, '🔧')} Équipement {detail.name}")
-
-    if not detail.summary:
-        st.info("ℹ️ Aucune donnée disponible pour cet équipement sur la période sélectionnée.")
         return
 
-    col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.metric("Disponibilité", detail.summary.get("Disponibilité", "N/A"))
-    with col2:
-        st.metric("Durée analysée", detail.summary.get("Durée", "N/A"))
-    with col3:
-        st.metric("Site", detail.summary.get("Site", "N/A"))
-    with col4:
-        st.metric(
-            "Périodes", detail.summary.get("Périodes", "0"),
-            help=f"Indisponibilités: {format_minutes(detail.unavailable_minutes)} | Données manquantes: {format_minutes(detail.missing_minutes)}"
+
+
+    df_display = df_display.sort_values("start").reset_index(drop=True)
+
+    block_labels = []
+
+    for idx, row in df_display.iterrows():
+
+        if row["est_disponible"] == -1:
+
+            status_icon = "⚠️"
+
+        elif row["est_disponible"] == 0:
+
+            status_icon = "❌"
+
+        else:
+
+            status_icon = "✅"
+
+
+
+        excl_tag = " [EXCLU]" if row["is_excluded"] == 1 else ""
+
+        start_str = row["start"].strftime("%Y-%m-%d %H:%M")
+
+        end_str = row["end"].strftime("%Y-%m-%d %H:%M")
+
+        cause = row.get("cause", "N/A")
+
+        duration = format_minutes(int(row["duration_minutes"]))
+
+
+
+        label = f"{idx}: {status_icon} {start_str} → {end_str} | {cause} | {duration}{excl_tag}"
+
+        block_labels.append(label)
+
+
+
+    selected_block_label = st.selectbox(
+
+        "Sélectionner un bloc temporel",
+
+        options=block_labels,
+
+        help="Choisissez le bloc sur lequel ajouter une annotation",
+
+    )
+
+
+
+    selected_idx = int(selected_block_label.split(":")[0])
+
+    selected_row = df_display.iloc[selected_idx]
+
+    est_val = int(selected_row["est_disponible"])
+
+
+
+    bloc_id = int(selected_row.get("bloc_id", -1))
+
+    source_table = str(selected_row.get("source_table", "") or "")
+
+
+
+    active_exclusion = bool(int(selected_row.get("is_excluded", 0)))
+
+    exclusion_id = selected_row.get("exclusion_id")
+
+
+
+    st.markdown("### 🚫 Gestion de l'exclusion du bloc")
+
+    if bloc_id <= 0 or not source_table:
+
+        st.warning(
+
+            "⚠️ Impossible d'identifier ce bloc dans la base : aucune action d'exclusion n'est possible."
+
         )
 
-    if not detail.unavailable_table.empty:
-        with st.expander("Périodes d'indisponibilité", expanded=False):
-            st.dataframe(
-                detail.unavailable_table,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "ID": st.column_config.TextColumn("ID", width="small"),
-                    "Date": st.column_config.TextColumn("Date", width="small"),
-                    "Jour": st.column_config.TextColumn("Jour", width="small"),
-                    "Début": st.column_config.TextColumn("Début", width="medium"),
-                    "Fin": st.column_config.TextColumn("Fin", width="medium"),
-                    "Durée": st.column_config.TextColumn("Durée", width="medium"),
-                    "Cause": st.column_config.TextColumn("Cause", width="large"),
-                    "Exclu": st.column_config.TextColumn("Exclu", width="small")
-                }
-            )
     else:
-        st.success("✅ Aucune indisponibilité détectée sur cette période.")
 
-    if not detail.missing_table.empty:
-        with st.expander("Périodes de données manquantes", expanded=False):
-            st.dataframe(
-                detail.missing_table,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "ID": st.column_config.TextColumn("ID", width="small"),
-                    "Date": st.column_config.TextColumn("Date", width="small"),
-                    "Début": st.column_config.TextColumn("Début", width="medium"),
-                    "Fin": st.column_config.TextColumn("Fin", width="medium"),
-                    "Durée": st.column_config.TextColumn("Durée", width="medium"),
-                    "Exclu": st.column_config.TextColumn("Exclu", width="small")
-                }
+        if active_exclusion:
+
+            st.info("Ce bloc est actuellement exclu des calculs.")
+
+            applied_by = selected_row.get("exclusion_applied_by")
+
+            applied_at = selected_row.get("exclusion_applied_at")
+
+            applied_comment = selected_row.get("exclusion_comment")
+
+            previous_status = int(selected_row.get("previous_status", est_val))
+
+
+
+            with st.expander("Détails de l'exclusion active", expanded=True):
+
+                st.write(
+
+                    {
+
+                        "Exclusion #": exclusion_id or "—",
+
+                        "Appliquée par": applied_by or "—",
+
+                        "Appliquée le": applied_at.strftime("%Y-%m-%d %H:%M") if isinstance(applied_at, datetime) else str(applied_at or "—"),
+
+                        "Statut initial": {1: "Disponible", 0: "Indisponible", -1: "Donnée manquante"}.get(previous_status, "Inconnu"),
+
+                        "Commentaire": applied_comment or "—",
+
+                    }
+
+                )
+
+
+
+            if st.button("❌ Retirer l'exclusion active"):
+
+                success = release_block_exclusion(bloc_id=bloc_id, table_name=source_table)
+
+                if success:
+
+                    st.success("Exclusion supprimée avec succès. Rechargement...")
+
+                    invalidate_cache()
+
+                    st.rerun()
+
+                else:
+
+                    st.error("Impossible de supprimer l'exclusion active.")
+
+        else:
+
+            st.info("Ce bloc n'est pas exclu.")
+
+
+
+        st.markdown("#### ➕ Ajouter / modifier une exclusion")
+
+        comment = st.text_area(
+
+            "Commentaire",
+
+            value="",
+
+            placeholder="Motif de l'exclusion",
+
+        )
+
+        new_status = st.selectbox(
+
+            "Statut à appliquer",
+
+            options=[("Disponible", 1), ("Indisponible", 0), ("Donnée manquante", -1)],
+
+            format_func=lambda opt: opt[0],
+
+        )[1]
+
+        user = st.text_input("Utilisateur", value=st.session_state.get("username", "ui"))
+
+
+
+        if st.button("✅ Appliquer l'exclusion"):
+
+            created, _, errors = _bulk_exclude_missing_blocks(
+
+                site=site,
+
+                equip=selected_equip,
+
+                start_dt=start_dt,
+
+                end_dt=end_dt,
+
+                new_status=new_status,
+
+                comment=comment,
+
+                user=user,
+
             )
 
-    if not detail.causes_table.empty:
-        with st.expander("Top causes d'indisponibilité", expanded=False):
-            st.dataframe(
-                detail.causes_table,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Cause": st.column_config.TextColumn("Cause", width="large"),
-                    "Occurrences": st.column_config.NumberColumn("Occurrences", width="small"),
-                    "Durée (min)": st.column_config.NumberColumn("Durée (min)", width="small"),
-                    "Durée Totale": st.column_config.TextColumn("Durée Totale", width="medium")
-                }
-            )
+            if errors:
 
-    if not detail.daily_table.empty:
-        with st.expander("Répartition quotidienne", expanded=False):
-            daily_sorted = detail.daily_table.copy()
-            if "Durée_Minutes" in daily_sorted.columns:
-                daily_sorted = daily_sorted.sort_values("Durée_Minutes", ascending=False)
-            st.dataframe(
-                daily_sorted[["Date", "Jour", "Nb Périodes", "Durée Totale", "Première Heure", "Dernière Heure", "% Journée"]],
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Date": st.column_config.TextColumn("Date", width="small"),
-                    "Jour": st.column_config.TextColumn("Jour", width="small"),
-                    "Nb Périodes": st.column_config.NumberColumn("Nb Périodes", width="small"),
-                    "Durée Totale": st.column_config.TextColumn("Durée Totale", width="medium"),
-                    "Première Heure": st.column_config.TextColumn("Première Heure", width="small"),
-                    "Dernière Heure": st.column_config.TextColumn("Dernière Heure", width="small"),
-                    "% Journée": st.column_config.TextColumn("% Journée", width="small")
-                }
-            )
+                for err in errors:
+
+                    st.error(err)
+
+            else:
+
+                st.success(f"{created} bloc(s) mis à jour. Rechargement...")
+
+                invalidate_cache()
+
+                st.rerun()
+
+
+
+    st.markdown("#### ➕ Ajouter une annotation libre")
+
+    annotation_type = st.selectbox(
+
+        "Type d'annotation",
+
+        options=["information", "alerte", "maintenance", "exclusion"],
+
+        index=0,
+
+    )
+
+    comment_annotation = st.text_area(
+
+        "Commentaire",
+
+        value="",
+
+        placeholder="Ajouter un commentaire descriptif",
+
+    )
+
+    user_annotation = st.text_input("Utilisateur (annotation)", value=st.session_state.get("username", "ui"))
+
+
+
+    start_annotation = st.datetime_input(
+
+        "Date de début",
+
+        value=selected_row["start"],
+
+        key="timeline_annotation_start",
+
+    )
+
+    end_annotation = st.datetime_input(
+
+        "Date de fin",
+
+        value=selected_row["end"],
+
+        min_value=start_annotation,
+
+        key="timeline_annotation_end",
+
+    )
+
+
+
+    if st.button("💾 Enregistrer l'annotation"):
+
+        success = create_annotation(
+
+            site=site,
+
+            equip=selected_equip,
+
+            start_dt=start_annotation,
+
+            end_dt=end_annotation,
+
+            annotation_type=annotation_type,
+
+            comment=comment_annotation,
+
+            user=user_annotation,
+
+        )
+
+        if success:
+
+            st.success("Annotation enregistrée avec succès !")
+
+            invalidate_cache()
+
+            st.rerun()
+
+        else:
+
+            st.error("Impossible d'enregistrer l'annotation.")
 
 
 
@@ -4982,12 +4679,10 @@ def render_report_tab():
 
 CONTRACT_MONTHLY_TABLE = "dispo_contract_monthly"
 
-
 def _month_bounds(start_dt: datetime, end_dt: datetime) -> Tuple[pd.Timestamp, pd.Timestamp]:
     start = pd.Timestamp(start_dt).to_period("M").to_timestamp()
     end = pd.Timestamp(end_dt).to_period("M").to_timestamp()
     return start, (end + pd.offsets.MonthBegin(1))
-
 
 def load_stored_contract_monthly(
     site: str,
@@ -5040,7 +4735,6 @@ def load_stored_contract_monthly(
         "Calculé le",
     ]
     return df[columns].sort_values("Mois").reset_index(drop=True)
-
 
 def render_contract_tab(site: Optional[str], start_dt: datetime, end_dt: datetime) -> None:
     """Affiche les règles contractuelles et charge la disponibilité mensuelle stockée."""
@@ -5214,7 +4908,6 @@ def calcul():
     pdc_block("PDC4", "23")
     pdc_block("PDC5", "14")
     pdc_block("PDC6", "24")
-
 
 def render_statistics_tab() -> None:
     """Affiche la vue statistique multi-équipements pour chaque site."""
@@ -5428,96 +5121,98 @@ def render_statistics_tab() -> None:
         if idx < len(selected_sites):
             st.divider()
 
-
-def main():
-    """Point d'entrée principal de l'application."""
-    
-    if "last_cache_clear" not in st.session_state:
-        st.session_state["last_cache_clear"] = None
-    
-    render_header()
-    
-    st.divider()
-    
-    site, equip, start_dt, end_dt = render_filters()
-
-    selection_valid = site is not None and equip is not None
-
-    st.session_state["current_site"] = site if selection_valid else None
-    st.session_state["current_equip"] = equip if selection_valid else None
-    st.session_state["current_start_dt"] = start_dt
-    st.session_state["current_end_dt"] = end_dt
-    st.session_state["current_mode"] = get_current_mode()
-
-    st.divider()
-
-    if not selection_valid:
-        st.error("⚠️ Sélectionnez un site et un équipement spécifiques pour afficher la disponibilité détaillée.")
-        df_filtered = pd.DataFrame()
-    else:
-        with st.spinner("⏳ Chargement des données..."):
-            df_filtered = load_filtered_blocks(start_dt, end_dt, site, equip, mode=get_current_mode())
-
-    if df_filtered is None:
-        logger.warning("Aucune donnée reçue de load_filtered_blocks, utilisation d'un DataFrame vide")
-        df_filtered = pd.DataFrame()
-
-    if not df_filtered.empty:
-        st.caption(f"📊 {len(df_filtered)} blocs chargés pour la période sélectionnée")
-    
-    tabs = st.tabs([
-        "📈 Vue d'ensemble",
-        "📊 Timeline - Exclusions/annotations rapides",
-        "🌍 Comparaison sites",
-        "⏱️ Timeline & Annotations - Équipement",
-        "📊 Rapport",
-        "🚫 Exclusions",
-        "💬 Commentaires",
-        "ℹ️ Info calcul",
-        "📄 Contrat",
-    ])
-
-    with tabs[0]:
-        render_overview_tab(df_filtered)
-
-    with tabs[1]:
-        render_statistics_tab()
-
-    with tabs[2]:
-        render_global_comparison_tab(start_dt, end_dt)
-
-    with tabs[3]:
-        render_timeline_tab(site, equip, start_dt, end_dt)
-
-    with tabs[4]:
-        render_report_tab()
-
-    with tabs[5]:
-        render_exclusions_tab()
-
-    with tabs[6]:
-        render_comments_tab()
-
-    with tabs[7]:
-        calcul()
-
-    with tabs[8]:
-        render_contract_tab(site, start_dt, end_dt)
-
-    st.divider()
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        st.caption("🔧 Dashboard Disponibilité v6.0")
-    
-    with col2:
-        if st.session_state.get("last_cache_clear"):
-            last_update = pd.to_datetime(st.session_state["last_cache_clear"]).strftime("%H:%M:%S")
-            st.caption(f"🔄 Dernier rafraîchissement: {last_update}")
-    
-    with col3:
-        st.caption("📞 Support: Nidec-ASI")
-
+def main():
+    """Point d'entrée principal de l'application."""
+
+    if "last_cache_clear" not in st.session_state:
+        st.session_state["last_cache_clear"] = None
+
+    if "app_mode" not in st.session_state:
+        st.session_state["app_mode"] = MODE_EQUIPMENT
+
+    render_header()
+    st.divider()
+
+    site, start_dt, end_dt = render_filters()
+
+    st.session_state["current_site"] = site
+    st.session_state["current_start_dt"] = start_dt
+    st.session_state["current_end_dt"] = end_dt
+    if site is None:
+        st.session_state["current_equip"] = None
+
+    selection_valid = site is not None
+
+    if not selection_valid:
+        st.error("⚠️ Sélectionnez un site spécifique pour afficher la disponibilité détaillée.")
+        df_filtered = pd.DataFrame()
+    else:
+        with st.spinner("⏳ Chargement des données..."):
+            df_equipment = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_EQUIPMENT)
+            df_pdc = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_PDC)
+        frames = [df for df in (df_equipment, df_pdc) if df is not None and not df.empty]
+        df_filtered = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+    if df_filtered is None:
+        logger.warning("Aucune donnée reçue de load_filtered_blocks, utilisation d'un DataFrame vide")
+        df_filtered = pd.DataFrame()
+
+    if not df_filtered.empty:
+        st.caption(f"📊 {len(df_filtered)} blocs chargés pour la période sélectionnée")
+
+    tabs = st.tabs([
+        "📈 Vue d'ensemble",
+        "📊 Timeline - Exclusions/annotations rapides",
+        "🌍 Comparaison sites",
+        "⏱️ Timeline & Annotations - Équipement",
+        "📊 Rapport",
+        "🚫 Exclusions",
+        "💬 Commentaires",
+        "ℹ️ Info calcul",
+        "📄 Contrat",
+    ])
+
+    with tabs[0]:
+        render_overview_tab(site, start_dt, end_dt)
+
+    with tabs[1]:
+        render_statistics_tab()
+
+    with tabs[2]:
+        render_global_comparison_tab(start_dt, end_dt)
+
+    with tabs[3]:
+        render_timeline_tab(site, start_dt, end_dt)
+
+    with tabs[4]:
+        render_report_tab()
+
+    with tabs[5]:
+        render_exclusions_tab()
+
+    with tabs[6]:
+        render_comments_tab()
+
+    with tabs[7]:
+        calcul()
+
+    with tabs[8]:
+        render_contract_tab(site, start_dt, end_dt)
+
+    st.divider()
+    col1, col2, col3 = st.columns(3)
+
+    with col1:
+        st.caption("🔧 Dashboard Disponibilité v6.0")
+
+    with col2:
+        if st.session_state.get("last_cache_clear"):
+            last_update = pd.to_datetime(st.session_state["last_cache_clear"]).strftime("%H:%M:%S")
+            st.caption(f"🔄 Dernier rafraîchissement: {last_update}")
+
+    with col3:
+        st.caption("📞 Support: Nidec-ASI")
+
 if __name__ == "__main__":
     try:
         main()
