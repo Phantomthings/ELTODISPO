@@ -2987,6 +2987,39 @@ def render_overview_tab(
             st.warning("⚠️ Impossible de générer le tableau récapitulatif sans période définie.")
 
         st.divider()
+
+        st.subheader("🔍 Analyse des disponibilités (IC/PC)")
+
+        if start_dt_current and end_dt_current:
+            icpc_stats = load_global_icpc_stats(
+                start_dt=start_dt_current,
+                end_dt=end_dt_current,
+                site=site_current,
+            )
+            if icpc_stats.empty:
+                st.info(
+                    "Aucune statistique IC/PC pré-calculée disponible pour la période sélectionnée."
+                )
+            else:
+                display_icpc = icpc_stats.drop(columns=["Site", "Occurrences"], errors="ignore")
+                st.dataframe(
+                    display_icpc,
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Mois": st.column_config.TextColumn("Mois", width="small"),
+                        "IC/PC": st.column_config.TextColumn("IC/PC", width="medium"),
+                        "Disponibilité (%)": st.column_config.NumberColumn(
+                            "Disponibilité (%)",
+                            width="small",
+                            format="%.2f%%",
+                        ),
+                    },
+                )
+        else:
+            st.info("Sélectionnez une période d'analyse pour consulter les statistiques IC/PC.")
+
+        st.divider()
     else:
         st.warning("⚠️ Aucune donnée disponible pour les critères sélectionnés.")
         st.info("💡 Conseil: Essayez d'élargir la période ou de modifier les filtres.")
@@ -5057,7 +5090,112 @@ def render_report_tab():
     else:
         st.success("✅ Aucune indisponibilité détectée sur la période analysée. Excellente performance !")
 
+GLOBAL_ICPC_STATS_TABLE = "indicator.stats_dispo_global"
 CONTRACT_MONTHLY_TABLE = "dispo_contract_monthly"
+
+
+def _site_query_variants(site: Optional[str]) -> List[str]:
+    """Retourne différentes variantes d'un identifiant de site pour les requêtes."""
+
+    if site is None:
+        return []
+
+    value = str(site).strip()
+    if not value:
+        return []
+
+    variants: List[str] = []
+    seen: Set[str] = set()
+
+    def _add(candidate: Optional[str]) -> None:
+        if candidate is None:
+            return
+        candidate = str(candidate).strip()
+        if not candidate:
+            return
+        if candidate not in seen:
+            seen.add(candidate)
+            variants.append(candidate)
+
+    _add(value)
+
+    if "_" in value:
+        suffix = value.split("_")[-1]
+        _add(suffix)
+        stripped_suffix = suffix.lstrip("0")
+        if stripped_suffix:
+            _add(stripped_suffix)
+            _add(stripped_suffix.zfill(3))
+        _add(suffix.zfill(3))
+
+    lower_value = value.lower()
+    for code, label in mapping_sites.items():
+        code_str = str(code).strip()
+        label_str = str(label).strip()
+        code_full = f"8822_{code_str}" if not code_str.startswith("8822_") else code_str
+        candidates = {
+            code_str.lower(),
+            label_str.lower(),
+            code_full.lower(),
+        }
+        if lower_value in candidates:
+            _add(code_str)
+            _add(code_full)
+            _add(label_str)
+
+    return variants
+
+
+def load_global_icpc_stats(
+    start_dt: datetime,
+    end_dt: datetime,
+    site: Optional[str] = None,
+) -> pd.DataFrame:
+    start_month, end_month = _month_bounds(start_dt, end_dt)
+    conditions = ["mois >= :start_month", "mois < :end_month"]
+    params: Dict[str, Any] = {
+        "start_month": start_month.to_pydatetime(),
+        "end_month": end_month.to_pydatetime(),
+    }
+    if site:
+        site_variants = _site_query_variants(site)
+        if site_variants:
+            variant_clauses: List[str] = []
+            for idx, value in enumerate(site_variants):
+                key = "site" if idx == 0 else f"site_alt_{idx}"
+                params[key] = value
+                variant_clauses.append(f"TRIM(site) = :{key}")
+            conditions.append("(" + " OR ".join(variant_clauses) + ")")
+
+    query = f"""
+        SELECT site, mois, icpc, pct, total_occurrences
+        FROM {GLOBAL_ICPC_STATS_TABLE}
+        WHERE {' AND '.join(conditions)}
+        ORDER BY site, mois, icpc
+    """
+
+    try:
+        df = execute_query(query, params)
+    except DatabaseError as exc:
+        logger.error("Erreur lors du chargement des stats ICPC : %s", exc)
+        return pd.DataFrame()
+
+    if df.empty:
+        return df
+
+    df = df.copy()
+    df["mois"] = pd.to_datetime(df["mois"], errors="coerce")
+    df["pct"] = pd.to_numeric(df["pct"], errors="coerce").astype(float)
+    df["total_occurrences"] = (
+        pd.to_numeric(df["total_occurrences"], errors="coerce").fillna(0).astype(int)
+    )
+    df["Site"] = df["site"].astype(str).map(mapping_sites).fillna(df["site"].astype(str))
+    df["Mois"] = df["mois"].dt.strftime("%Y-%m")
+    df["IC/PC"] = df["icpc"].astype(str)
+    df["Disponibilité (%)"] = df["pct"].round(2)
+    df["Occurrences"] = df["total_occurrences"]
+    columns = ["Site", "Mois", "IC/PC", "Disponibilité (%)", "Occurrences"]
+    return df[columns].sort_values(["Site", "Mois", "IC/PC"]).reset_index(drop=True)
 
 
 def _month_bounds(start_dt: datetime, end_dt: datetime) -> Tuple[pd.Timestamp, pd.Timestamp]:
