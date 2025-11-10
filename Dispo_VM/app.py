@@ -5219,7 +5219,7 @@ def calcul():
 def render_statistics_tab() -> None:
     """Affiche la vue statistique multi-équipements pour chaque site."""
 
-    st.header("📊 Vue Statistique Stations")
+    st.header("📊 Timeline - Exclusions/annotations rapides")
     st.caption("Analyse les indisponibilités critiques AC, DC et PDC en excluant les pertes de données.")
 
     available_sites = get_sites(MODE_EQUIPMENT)
@@ -5467,9 +5467,9 @@ def main():
     
     tabs = st.tabs([
         "📈 Vue d'ensemble",
-        "📊 Vue statistique",
+        "📊 Timeline - Exclusions/annotations rapides",
         "🌍 Comparaison sites",
-        "⏱️ Timeline & Annotations",
+        "⏱️ Timeline & Annotations - Équipement",
         "📊 Rapport",
         "🚫 Exclusions",
         "💬 Commentaires",
