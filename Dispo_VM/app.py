@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from itertools import cycle
-from typing import Any, Dict, Optional, List, Tuple, Set, Callable
+from typing import Any, Dict, Optional, List, Tuple, Set, Callable, Iterable
 import logging
 from zoneinfo import ZoneInfo
 import pandas as pd
@@ -2755,12 +2755,12 @@ def render_header():
             invalidate_cache()
             st.rerun()
 def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
-    """Affiche les filtres et retourne les valeurs sélectionnées."""
+    """Affiche les filtres globaux (site + période) et retourne la sélection."""
     current_mode = get_current_mode()
     st.subheader("🔍 Filtres de Recherche")
 
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1:
+    col_site, col_period = st.columns([1, 2])
+    with col_site:
         equipment_sites = set(get_sites(MODE_EQUIPMENT) or [])
         pdc_sites = set(get_sites(MODE_PDC) or [])
         site_codes = sorted(equipment_sites.union(pdc_sites))
@@ -2773,74 +2773,69 @@ def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
         if previous_site in site_codes:
             site_index = site_codes.index(previous_site)
 
-        selected_site = st.selectbox(
+        site = st.selectbox(
             "Site",
             options=site_codes,
             index=site_index,
             format_func=lambda code: mapping_sites.get(code.split("_")[-1], code),
             help="Sélectionnez un site"
         )
-        site = selected_site
 
-    with col2:
-        equipments_with_mode: List[Tuple[str, str]] = []
-        if site:
-            equips_std = get_equipments(MODE_EQUIPMENT, site) or []
-            equips_pdc = get_equipments(MODE_PDC, site) or []
-        else:
-            equips_std = get_equipments(MODE_EQUIPMENT) or []
-            equips_pdc = get_equipments(MODE_PDC) or []
+    equipments_with_mode: List[Tuple[str, str]] = []
+    if site:
+        equips_std = get_equipments(MODE_EQUIPMENT, site) or []
+        equips_pdc = get_equipments(MODE_PDC, site) or []
+    else:
+        equips_std = get_equipments(MODE_EQUIPMENT) or []
+        equips_pdc = get_equipments(MODE_PDC) or []
 
-        for equip_label in equips_std:
-            equipments_with_mode.append((equip_label, MODE_EQUIPMENT))
-        for equip_label in equips_pdc:
-            equipments_with_mode.append((equip_label, MODE_PDC))
+    for equip_label in equips_std:
+        equipments_with_mode.append((equip_label, MODE_EQUIPMENT))
+    for equip_label in equips_pdc:
+        equipments_with_mode.append((equip_label, MODE_PDC))
 
-        if not equipments_with_mode:
-            st.warning("Aucun équipement ou point de charge pour ce site.")
-            return site, None, datetime.min, datetime.min
+    def _sort_key(item: Tuple[str, str]) -> Tuple[int, str]:
+        label, mode = item
+        equipment_order = {"AC": "0", "DC1": "1", "DC2": "2"}
+        if mode == MODE_EQUIPMENT:
+            return (0, equipment_order.get(label, label))
+        return (1, label)
 
-        def _sort_key(item: Tuple[str, str]) -> Tuple[int, str]:
-            label, mode = item
-            equipment_order = {"AC": "0", "DC1": "1", "DC2": "2"}
-            if mode == MODE_EQUIPMENT:
-                return (0, equipment_order.get(label, label))
-            return (1, label)
+    equipments_with_mode.sort(key=_sort_key)
 
-        equipments_with_mode.sort(key=_sort_key)
+    labels = [label for label, _ in equipments_with_mode]
+    mode_by_label = {label: mode for label, mode in equipments_with_mode}
 
-        labels = [label for label, _ in equipments_with_mode]
-        mode_by_label = {label: mode for label, mode in equipments_with_mode}
-
-        previous_equip = st.session_state.get("current_equip")
+    previous_equip = st.session_state.get("current_equip")
+    equip: Optional[str] = None
+    if labels:
         equip_index = 0
         if previous_equip in labels:
             equip_index = labels.index(previous_equip)
         elif current_mode == MODE_PDC:
-            # Préserver le mode lorsque l'équipement précédent n'est plus disponible
             for idx, label in enumerate(labels):
                 if mode_by_label[label] == MODE_PDC:
                     equip_index = idx
                     break
 
-        selected_label = st.selectbox(
-            "Équipement / Point de charge",
-            options=labels,
-            index=equip_index,
-            help="Sélectionnez un équipement ou un point de charge"
-        )
+        default_label = labels[equip_index]
+        equip = previous_equip if previous_equip in labels else default_label
 
-        selected_mode = mode_by_label.get(selected_label, MODE_EQUIPMENT)
-        if selected_mode != current_mode:
-            set_current_mode(selected_mode)
-            current_mode = selected_mode
+        if equip != previous_equip:
+            st.session_state["current_equip"] = equip
+            selected_mode = mode_by_label.get(equip, MODE_EQUIPMENT)
+            if selected_mode != current_mode:
+                set_current_mode(selected_mode)
+                current_mode = selected_mode
+    else:
+        if site:
+            st.warning("Aucun équipement ou point de charge pour ce site.")
+        st.session_state["current_equip"] = None
 
-        equip = selected_label
-
-    with col3:
+    with col_period:
         today = datetime.now(timezone.utc).date()
         c1, c2 = st.columns(2)
-        
+
         default_start = st.session_state.get("filter_start_date", today - timedelta(days=30))
         start_date = c1.date_input(
             "Date de début",
@@ -2868,11 +2863,89 @@ def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
         if end_date < start_date:
             st.session_state["filter_end_date"] = start_date
             end_date = start_date
-    
+
     start_dt = datetime.combine(start_date, time.min)
     end_dt = datetime.combine(end_date, time.max)
 
-    return site, equip, start_dt, end_dt
+    return site, st.session_state.get("current_equip"), start_dt, end_dt
+
+
+def render_equipment_selector(
+    site: Optional[str],
+    *,
+    widget_key: str,
+    help_text: str = "Sélectionnez un équipement ou un point de charge",
+    sync_keys: Optional[Iterable[str]] = None,
+) -> Optional[str]:
+    """Affiche un sélecteur d'équipement contextualisé et synchronise l'état."""
+    equipments_with_mode: List[Tuple[str, str]] = []
+    if site:
+        equips_std = get_equipments(MODE_EQUIPMENT, site) or []
+        equips_pdc = get_equipments(MODE_PDC, site) or []
+    else:
+        equips_std = get_equipments(MODE_EQUIPMENT) or []
+        equips_pdc = get_equipments(MODE_PDC) or []
+
+    for equip_label in equips_std:
+        equipments_with_mode.append((equip_label, MODE_EQUIPMENT))
+    for equip_label in equips_pdc:
+        equipments_with_mode.append((equip_label, MODE_PDC))
+
+    if not equipments_with_mode:
+        st.warning("Aucun équipement ou point de charge disponible pour ce périmètre.")
+        st.session_state["current_equip"] = None
+        return None
+
+    def _sort_key(item: Tuple[str, str]) -> Tuple[int, str]:
+        label, mode = item
+        equipment_order = {"AC": "0", "DC1": "1", "DC2": "2"}
+        if mode == MODE_EQUIPMENT:
+            return (0, equipment_order.get(label, label))
+        return (1, label)
+
+    equipments_with_mode.sort(key=_sort_key)
+
+    labels = [label for label, _ in equipments_with_mode]
+    mode_by_label = {label: mode for label, mode in equipments_with_mode}
+
+    current_mode = get_current_mode()
+    previous_equip = st.session_state.get("current_equip")
+
+    if widget_key not in st.session_state or st.session_state[widget_key] not in labels:
+        if previous_equip in labels:
+            st.session_state[widget_key] = previous_equip
+        else:
+            fallback_label = labels[0]
+            if current_mode == MODE_PDC:
+                for label in labels:
+                    if mode_by_label[label] == MODE_PDC:
+                        fallback_label = label
+                        break
+            st.session_state[widget_key] = fallback_label
+
+    default_label = st.session_state[widget_key]
+    if default_label not in labels:
+        default_label = labels[0]
+
+    selected_label = st.selectbox(
+        "Équipement / Point de charge",
+        options=labels,
+        index=labels.index(default_label),
+        key=widget_key,
+        help=help_text,
+    )
+
+    selected_mode = mode_by_label.get(selected_label, MODE_EQUIPMENT)
+    if selected_mode != current_mode:
+        set_current_mode(selected_mode)
+
+    st.session_state["current_equip"] = selected_label
+
+    if sync_keys:
+        for other_key in sync_keys:
+            st.session_state[other_key] = selected_label
+
+    return selected_label
 
 def render_overview_tab(df: Optional[pd.DataFrame]):
     """Affiche l'onglet vue d'ensemble."""
@@ -3017,7 +3090,18 @@ def render_overview_tab(df: Optional[pd.DataFrame]):
     st.divider()
     
     st.subheader("🔍 Analyse des Indisponibilités")
-    causes = get_unavailability_causes(df)
+    site_scope = st.session_state.get("current_site")
+    selected_equip = render_equipment_selector(
+        site_scope,
+        widget_key="equipment_selector_analysis",
+        sync_keys=["equipment_selector_timeline"],
+    )
+
+    df_analysis = df
+    if selected_equip and isinstance(df, pd.DataFrame) and "equipement_id" in df.columns:
+        df_analysis = df[df["equipement_id"].astype(str).str.upper() == selected_equip.upper()]
+
+    causes = get_unavailability_causes(df_analysis)
 
     if causes.empty:
         st.success("Aucune indisponibilité détectée sur la période")
@@ -3077,10 +3161,10 @@ def render_overview_tab(df: Optional[pd.DataFrame]):
     
     # Récupérer l'équipement sélectionné pour la traduction
     current_equip = st.session_state.get("current_equip")
-    
-    if current_equip and not df.empty:
+
+    if current_equip and not df_analysis.empty:
         # Générer le tableau traduit
-        causes_translated = get_translated_unavailability_causes(df, current_equip)
+        causes_translated = get_translated_unavailability_causes(df_analysis, current_equip)
         
         if not causes_translated.empty:
             st.info(f"🔧 Traduction des codes IC/PC pour l'équipement **{current_equip}**")
@@ -5476,8 +5560,8 @@ def main():
 
     selection_valid = site is not None and equip is not None
 
-    st.session_state["current_site"] = site if selection_valid else None
-    st.session_state["current_equip"] = equip if selection_valid else None
+    st.session_state["current_site"] = site
+    st.session_state["current_equip"] = equip
     st.session_state["current_start_dt"] = start_dt
     st.session_state["current_end_dt"] = end_dt
     st.session_state["current_mode"] = get_current_mode()
@@ -5485,7 +5569,10 @@ def main():
     st.divider()
 
     if not selection_valid:
-        st.error("⚠️ Sélectionnez un site et un équipement spécifiques pour afficher la disponibilité détaillée.")
+        st.info(
+            "ℹ️ Sélectionnez un site ci-dessus puis choisissez un équipement dans "
+            "les sections *⏱️ Timeline & Annotations - Équipement* ou *🔍 Analyse des Indisponibilités*."
+        )
         df_filtered = pd.DataFrame()
     else:
         with st.spinner("⏳ Chargement des données..."):
@@ -5520,7 +5607,12 @@ def main():
         render_global_comparison_tab(start_dt, end_dt)
 
     with tabs[3]:
-        render_timeline_tab(site, equip, start_dt, end_dt)
+        equip_timeline = render_equipment_selector(
+            site,
+            widget_key="equipment_selector_timeline",
+            sync_keys=["equipment_selector_analysis"],
+        )
+        render_timeline_tab(site, equip_timeline, start_dt, end_dt)
 
     with tabs[4]:
         render_report_tab()
