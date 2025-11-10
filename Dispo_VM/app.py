@@ -2801,6 +2801,38 @@ def render_header():
         if st.button("🔄 Actualiser", use_container_width=True):
             invalidate_cache()
             st.rerun()
+
+
+def render_mode_selector() -> None:
+    """Affiche le sélecteur permettant d'alterner entre équipements et PDC."""
+
+    mode_options = list(MODE_LABELS.keys())
+    current_mode = get_current_mode()
+
+    try:
+        default_index = mode_options.index(current_mode)
+    except ValueError:
+        default_index = 0
+
+    selected_mode = st.radio(
+        "Périmètre analysé",
+        options=mode_options,
+        index=default_index,
+        format_func=lambda key: MODE_LABELS.get(key, key),
+        horizontal=True,
+        key="mode_selector",
+        help=(
+            "Choisissez « Disponibilité équipements » pour afficher les indicateurs AC/DC, "
+            "ou « Disponibilité points de charge » pour focaliser l'analyse sur les PDC."
+        ),
+    )
+
+    if selected_mode != current_mode:
+        set_current_mode(selected_mode)
+        st.session_state.pop("current_equip", None)
+        invalidate_cache()
+
+
 def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
     """Affiche les filtres et retourne les valeurs sélectionnées."""
     st.subheader("🔍 Filtres de Recherche")
@@ -5591,9 +5623,13 @@ def main():
         st.session_state["last_cache_clear"] = None
     
     render_header()
-    
+
     st.divider()
-    
+
+    render_mode_selector()
+
+    st.divider()
+
     site, equip, start_dt, end_dt = render_filters()
 
     site_selected = site is not None
