@@ -4,6 +4,7 @@ import os
 import re
 import calendar
 import subprocess
+import sys
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from itertools import cycle
@@ -56,6 +57,8 @@ MODE_LABELS = {
 }
 BASE_DIR = Path(__file__).resolve().parent
 CONTRACT_SCRIPT_PATH = BASE_DIR / "dispo-c" / "contrat.go"
+POST_TICKET_PY_SCRIPT = BASE_DIR / "Exclu_1.py"
+POST_TICKET_GO_SCRIPT = BASE_DIR / "Exclu" / "Ex.go"
 ALL_EQUIPMENT_CHOICES = [
     "PDC1",
     "PDC2",
@@ -5156,14 +5159,77 @@ def _run_contract_refresh_script() -> None:
     stdout = (completed.stdout or "").strip()
     stderr = (completed.stderr or "").strip()
     if stdout:
-        st.code(stdout, language="text")
+        logger.info("Résultat du script contractuel (stdout): %s", stdout)
     if stderr:
-        st.code(stderr, language="text")
+        logger.info("Résultat du script contractuel (stderr): %s", stderr)
+
+
+def _run_post_ticket_processing() -> None:
+    if not POST_TICKET_PY_SCRIPT.exists():
+        st.error(
+            "Impossible de trouver le script `Exclu_1.py`. Vérifiez l'installation de l'application."
+        )
+        return
+
+    if not POST_TICKET_GO_SCRIPT.exists():
+        st.error("Impossible de trouver le script `Exclu/Ex.go`. Vérifiez l'installation de l'application.")
+        return
+
+    try:
+        with st.spinner("Exécution du script `Exclu_1.py`..."):
+            subprocess.run(
+                [sys.executable, str(POST_TICKET_PY_SCRIPT)],
+                cwd=str(POST_TICKET_PY_SCRIPT.parent),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+    except FileNotFoundError:
+        st.error("L'interpréteur Python est introuvable sur le serveur.")
+        return
+    except subprocess.CalledProcessError as exc:
+        st.error("Erreur lors de l'exécution du script `Exclu_1.py`.")
+        stdout = (exc.stdout or "").strip()
+        stderr = (exc.stderr or "").strip()
+        if stdout:
+            st.code(stdout, language="text")
+        if stderr:
+            st.code(stderr, language="text")
+        return
+
+    try:
+        with st.spinner("Exécution du script `Exclu/Ex.go`..."):
+            subprocess.run(
+                ["go", "run", str(POST_TICKET_GO_SCRIPT)],
+                cwd=str(POST_TICKET_GO_SCRIPT.parent),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+    except FileNotFoundError:
+        st.error(
+            "La commande `go` est introuvable sur le serveur. Merci de vérifier l'installation de Go."
+        )
+        return
+    except subprocess.CalledProcessError as exc:
+        st.error("Erreur lors de l'exécution du script `Exclu/Ex.go`.")
+        stdout = (exc.stdout or "").strip()
+        stderr = (exc.stderr or "").strip()
+        if stdout:
+            st.code(stdout, language="text")
+        if stderr:
+            st.code(stderr, language="text")
+        return
+
+    st.success("Post traitement du ticket terminé avec succès.")
 
 
 def render_contract_tab(site: Optional[str], start_dt: datetime, end_dt: datetime) -> None:
     """Affiche les règles contractuelles et charge la disponibilité mensuelle stockée."""
     st.header("📄 Disponibilité contractuel")
+
+    if st.button("Post traitement ticket"):
+        _run_post_ticket_processing()
 
     if st.button("🔄 Recalculer les données contractuelles"):
         _run_contract_refresh_script()
