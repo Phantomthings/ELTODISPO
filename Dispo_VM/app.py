@@ -2879,7 +2879,6 @@ def render_overview_tab(
         stats_raw = calculate_availability(df_general, include_exclusions=False)
         stats_excl = calculate_availability(df_general, include_exclusions=True)
 
-        st.subheader("📊 Indicateurs Clés")
         col1, col2, col3, col4 = st.columns(4)
 
         with col1:
@@ -2979,7 +2978,7 @@ def render_overview_tab(
                             color = "inverse"
 
                         st.metric(
-                            f"{equip} - Disponibilité",
+                            f"{equip} - Disponibilité avec exclusions",
                             f"{pct_brut:.2f}%",
                             delta=f"{pct_excl - pct_brut:.2f}%",
                             delta_color=color,
@@ -3176,94 +3175,63 @@ def render_overview_tab(
 
     # evolution mensuelle
     st.subheader("📅 Évolution Mensuelle")
-    site = st.session_state.get("current_site")
-    start_dt = st.session_state.get("current_start_dt")
-    end_dt = st.session_state.get("current_end_dt")
+    site_current = st.session_state.get("current_site")
+    start_dt_current = st.session_state.get("current_start_dt")
+    end_dt_current = st.session_state.get("current_end_dt")
 
-    df_monthly = calculate_monthly_availability(site, None, months=12, start_dt=start_dt, end_dt=end_dt, mode=mode)
-    if not df_monthly.empty:
-        months_series = pd.to_datetime(df_monthly["month"])
-        month_keys = months_series.dt.strftime("%Y-%m")
-        month_labels = months_series.dt.strftime("%b %Y")
-        month_options = list(dict(zip(month_keys, month_labels)).items())
+    monthly_df = calculate_monthly_availability(
+        site=site_current,
+        equip=None,
+        start_dt=start_dt_current,
+        end_dt=end_dt_current,
+        mode=mode,
+    )
 
-        default_keys = list(dict.fromkeys(month_keys))
-
-        sel_keys = st.multiselect(
-            "Mois à afficher",
-            options=[k for k, _ in month_options],
-            format_func=lambda k: dict(month_options)[k],
-            default=default_keys
-        )
-
-        df_monthly = df_monthly[month_keys.isin(sel_keys)].copy()
-        df_monthly = df_monthly.sort_values("month")
-    if df_monthly.empty:
-        st.info("ℹ️ Données mensuelles insuffisantes pour l'affichage.")
+    if monthly_df is None or monthly_df.empty:
+        st.info("Aucune donnée mensuelle disponible pour la période sélectionnée.")
     else:
-        brut = df_monthly["pct_brut"].astype(float).where(pd.notna(df_monthly["pct_brut"]), None)
-        excl = df_monthly["pct_excl"].astype(float).where(pd.notna(df_monthly["pct_excl"]), None)
+        monthly_plot_df = monthly_df.copy()
+        monthly_plot_df["month"] = pd.to_datetime(monthly_plot_df["month"], errors="coerce")
+        monthly_plot_df = monthly_plot_df.dropna(subset=["month"])
 
-        fig = go.Figure()
-        fig.add_trace(go.Bar(
-            x=df_monthly["month"], y=brut, name="Brute",
-            text=[f"{v:.1f}%" if v is not None else "" for v in brut],
-            textposition="outside",
-        ))
-        fig.add_trace(go.Bar(
-            x=df_monthly["month"], y=excl, name="Avec exclusions",
-            text=[f"{v:.1f}%" if v is not None else "" for v in excl],
-            textposition="outside",
-        ))
+        if monthly_plot_df.empty:
+            st.info("Aucune donnée mensuelle disponible pour la période sélectionnée.")
+        else:
+            monthly_plot_df["month_label"] = monthly_plot_df["month"].dt.strftime("%Y-%m")
 
-        fig.update_layout(
-            title="Disponibilité mensuelle",
-            xaxis_title="Mois",
-            yaxis_title="Disponibilité (%)",
-            yaxis=dict(range=[0, 105]),
-            barmode="group",
-            bargap=0.25,
-            hovermode="x",
-            legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
-        )
-        fig.update_xaxes(tickformat="%b %Y")
-
-        st.plotly_chart(fig, use_container_width=True)
-        with st.expander("📊 Statistiques détaillées"):
-            df_display = df_monthly.copy()
-            try:
-                mois_labels = (
-                    pd.to_datetime(df_display["month"]).dt.month_name(locale="fr_FR").str.capitalize()
-                    + " "
-                    + pd.to_datetime(df_display["month"]).dt.year.astype(str)
+            fig = go.Figure()
+            fig.add_trace(
+                go.Scatter(
+                    x=monthly_plot_df["month_label"],
+                    y=monthly_plot_df["pct_brut"],
+                    mode="lines+markers",
+                    name="Disponibilité brute",
+                    line=dict(color="#1f77b4", width=2),
+                    marker=dict(size=8),
                 )
-            except Exception:
-                _mois = ["janvier","février","mars","avril","mai","juin",
-                        "juillet","août","septembre","octobre","novembre","décembre"]
-                m = pd.to_datetime(df_display["month"])
-                mois_labels = m.dt.month.map(lambda i: _mois[i-1]).str.capitalize() + " " + m.dt.year.astype(str)
+            )
+            fig.add_trace(
+                go.Scatter(
+                    x=monthly_plot_df["month_label"],
+                    y=monthly_plot_df["pct_excl"],
+                    mode="lines+markers",
+                    name="Disponibilité avec exclusions",
+                    line=dict(color="#2ca02c", width=2),
+                    marker=dict(size=8),
+                )
+            )
 
-            df_display["Mois"] = mois_labels
-            df_display = df_display.rename(columns={
-                "pct_brut": "Disponibilité brute",
-                "pct_excl": "Avec exclusions",
-                "total_minutes": "Durée totale"
-            })[["Mois", "Disponibilité brute", "Avec exclusions", "Durée totale"]]
+            fig.update_layout(
+                xaxis_title="Mois",
+                yaxis_title="Disponibilité (%)",
+                legend_title="Type de calcul",
+                hovermode="x unified",
+                height=360,
+            )
 
-            def _fmt_duree(x):
-                try:
-                    return format_minutes(int(x))
-                except Exception:
-                    return "—"
-
-            st.dataframe(
-                df_display.style.format({
-                    "Disponibilité brute": "{:.2f}%",
-                    "Avec exclusions": "{:.2f}%",
-                    "Durée totale": _fmt_duree
-                }),
-                hide_index=True,
-                use_container_width=True
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption(
+                "Comparaison de la disponibilité brute et après exclusions, calculée mois par mois sur la période analysée."
             )
 
 
