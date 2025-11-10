@@ -3,9 +3,11 @@ import math
 import os
 import re
 import calendar
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from itertools import cycle
+from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Set, Callable
 import logging
 from zoneinfo import ZoneInfo
@@ -52,6 +54,8 @@ MODE_LABELS = {
     MODE_EQUIPMENT: "Disponibilité équipements",
     MODE_PDC: "Disponibilité points de charge",
 }
+BASE_DIR = Path(__file__).resolve().parent
+CONTRACT_SCRIPT_PATH = BASE_DIR / "dispo-c" / "contrat.go"
 ALL_EQUIPMENT_CHOICES = [
     "PDC1",
     "PDC2",
@@ -5218,13 +5222,14 @@ def _month_bounds(start_dt: datetime, end_dt: datetime) -> Tuple[pd.Timestamp, p
 
 
 def load_stored_contract_monthly(
-    site: str,
     start_dt: datetime,
     end_dt: datetime,
+    site: Optional[str] = None,
 ) -> pd.DataFrame:
     start_month, end_month = _month_bounds(start_dt, end_dt)
     query = f"""
         SELECT
+            site,
             period_start,
             t2,
             t_sum,
@@ -5232,19 +5237,21 @@ def load_stored_contract_monthly(
             notes,
             computed_at
         FROM {CONTRACT_MONTHLY_TABLE}
-        WHERE site = :site
-          AND period_start >= :start_month
+        WHERE period_start >= :start_month
           AND period_start < :end_month
-        ORDER BY period_start
     """
+    params: Dict[str, Any] = {
+        "start_month": start_month.to_pydatetime(),
+        "end_month": end_month.to_pydatetime(),
+    }
+    if site:
+        query += "\n          AND site = :site"
+        params["site"] = site
+    query += "\n        ORDER BY site, period_start"
     try:
         df = execute_query(
             query,
-            {
-                "site": site,
-                "start_month": start_month.to_pydatetime(),
-                "end_month": end_month.to_pydatetime(),
-            },
+            params,
         )
     except DatabaseError:
         return pd.DataFrame()
@@ -5252,6 +5259,7 @@ def load_stored_contract_monthly(
     if df.empty:
         return df
 
+    df["Site"] = df["site"].astype(str)
     df["period_start"] = pd.to_datetime(df["period_start"], errors="coerce")
     df["Mois"] = df["period_start"].dt.strftime("%Y-%m")
     df["T2"] = df["t2"].astype(int)
@@ -5260,6 +5268,7 @@ def load_stored_contract_monthly(
     df["Notes"] = df["notes"].fillna("")
     df["Calculé le"] = pd.to_datetime(df["computed_at"], errors="coerce")
     columns = [
+        "Site",
         "Mois",
         "T2",
         "T(11..16)+T3",
@@ -5267,12 +5276,55 @@ def load_stored_contract_monthly(
         "Notes",
         "Calculé le",
     ]
-    return df[columns].sort_values("Mois").reset_index(drop=True)
+    return df[columns].sort_values(["Site", "Mois"]).reset_index(drop=True)
+
+
+def _run_contract_refresh_script() -> None:
+    if not CONTRACT_SCRIPT_PATH.exists():
+        st.error(
+            "Impossible de trouver le script `dispo-c/contrat.go`. Vérifiez l'installation de l'application."
+        )
+        return
+
+    try:
+        with st.spinner("Exécution du calcul contractuel..."):
+            completed = subprocess.run(
+                ["go", "run", str(CONTRACT_SCRIPT_PATH)],
+                cwd=str(CONTRACT_SCRIPT_PATH.parent),
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+    except FileNotFoundError:
+        st.error(
+            "La commande `go` est introuvable sur le serveur. Merci de vérifier l'installation de Go."
+        )
+        return
+    except subprocess.CalledProcessError as exc:
+        st.error("Erreur lors de l'exécution du script contractuel.")
+        stdout = (exc.stdout or "").strip()
+        stderr = (exc.stderr or "").strip()
+        if stdout:
+            st.code(stdout, language="text")
+        if stderr:
+            st.code(stderr, language="text")
+        return
+
+    st.success("Calcul contractuel terminé avec succès.")
+    stdout = (completed.stdout or "").strip()
+    stderr = (completed.stderr or "").strip()
+    if stdout:
+        st.code(stdout, language="text")
+    if stderr:
+        st.code(stderr, language="text")
 
 
 def render_contract_tab(site: Optional[str], start_dt: datetime, end_dt: datetime) -> None:
     """Affiche les règles contractuelles et charge la disponibilité mensuelle stockée."""
     st.header("📄 Disponibilité contractuel")
+
+    if st.button("🔄 Recalculer les données contractuelles"):
+        _run_contract_refresh_script()
 
     st.markdown("### Formule générale")
     st.markdown(
@@ -5333,18 +5385,14 @@ def render_contract_tab(site: Optional[str], start_dt: datetime, end_dt: datetim
 
     st.markdown("---")
     st.subheader("📅 Disponibilité contractuelle mensuelle")
-    if not site:
-        st.warning("Sélectionnez un site dans les filtres pour calculer la disponibilité contractuelle.")
-        return
 
     with st.spinner("Chargement des indicateurs contractuels..."):
-        monthly_df = load_stored_contract_monthly(site, start_dt, end_dt)
+        monthly_df = load_stored_contract_monthly(start_dt, end_dt)
 
     if monthly_df.empty:
         st.info(
             "Aucune donnée contractuelle stockée pour cette période. "
-            "Exécutez le script `python Dispo/contract_metrics_job.py <site> <debut> <fin>` "
-            "pour alimenter le tableau."
+            "Utilisez le bouton ci-dessus pour lancer le calcul contractuel si nécessaire."
         )
         return
 
@@ -5357,18 +5405,22 @@ def render_contract_tab(site: Optional[str], start_dt: datetime, end_dt: datetim
         st.warning(warning)
 
     global_availability = monthly_df["Disponibilité (%)"].mean()
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("Disponibilité moyenne", f"{global_availability:.2f}%")
     with col2:
         total_steps = int(monthly_df["T2"].sum())
         st.metric("Nombre total de pas (T2)", f"{total_steps}")
+    with col3:
+        site_count = monthly_df["Site"].nunique()
+        st.metric("Sites couverts", site_count)
 
     st.dataframe(
         monthly_df.drop(columns=["Notes"], errors="ignore"),
         hide_index=True,
         use_container_width=True,
         column_config={
+            "Site": st.column_config.TextColumn("Site", width="medium"),
             "Mois": st.column_config.TextColumn("Mois", width="medium"),
             "T2": st.column_config.NumberColumn("T2", width="small"),
             "T(11..16)+T3": st.column_config.NumberColumn("T(11..16)+T3", format="%.2f"),
@@ -5383,12 +5435,16 @@ def render_contract_tab(site: Optional[str], start_dt: datetime, end_dt: datetim
             st.caption(
                 f"Dernière mise à jour contractuelle : {last_update.strftime('%Y-%m-%d %H:%M')}"
             )
-    evo_df = monthly_df.copy()
+    evo_df = monthly_df[["Mois", "Site", "Disponibilité (%)"]].copy()
     evo_df = evo_df[pd.notna(evo_df["Disponibilité (%)"])]
-    evo_df["__mois_dt"] = pd.to_datetime(evo_df["Mois"] + "-01", errors="coerce")
-    evo_df = evo_df.sort_values("__mois_dt")
-    evo_df = evo_df.set_index("Mois")
-    st.bar_chart(evo_df["Disponibilité (%)"])
+    if not evo_df.empty:
+        evo_df["__mois_dt"] = pd.to_datetime(evo_df["Mois"] + "-01", errors="coerce")
+        trend_df = (
+            evo_df.sort_values(["__mois_dt", "Site"])
+            .pivot(index="__mois_dt", columns="Site", values="Disponibilité (%)")
+        )
+        trend_df.index = trend_df.index.strftime("%Y-%m")
+        st.line_chart(trend_df)
 
 def calcul():
     st.header("Réseau AC")
