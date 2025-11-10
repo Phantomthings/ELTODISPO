@@ -3,7 +3,7 @@ import math
 import os
 import calendar
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, time, timedelta, timezone
 from itertools import cycle
 from typing import Any, Dict, Optional, List, Tuple, Set, Callable
@@ -30,6 +30,18 @@ class ExclusionActionResult:
     new_status: int
     changed_by: Optional[str]
     comment: Optional[str]
+
+
+@dataclass
+class EquipmentReportDetail:
+    """Structured data used to display the report tab detail view."""
+
+    name: str
+    summary: Dict[str, Any]
+    raw_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    unavailable_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    missing_table: pd.DataFrame = field(default_factory=pd.DataFrame)
+    causes_table: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 _TABLE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 from Projects import mapping_sites
@@ -4500,6 +4512,239 @@ def render_timeline_tab(site: Optional[str], start_dt: datetime, end_dt: datetim
             st.error("Impossible d'enregistrer l'annotation.")
 
 
+def _format_report_table(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a cleaned table ready for display in the report tab."""
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    table = df.copy()
+    if "Durée_Minutes" in table.columns:
+        table["Durée_Minutes"] = pd.to_numeric(table["Durée_Minutes"], errors="coerce").fillna(0).astype(int)
+        table["Durée (min)"] = table["Durée_Minutes"].astype(int)
+
+    preferred_order = [
+        "ID",
+        "Site",
+        "Équipement",
+        "Début",
+        "Fin",
+        "Durée",
+        "Durée (min)",
+        "Statut",
+        "Cause Originale",
+        "Cause Traduite",
+        "Exclu",
+    ]
+    ordered_columns = [col for col in preferred_order if col in table.columns]
+    extra_columns = [
+        col
+        for col in table.columns
+        if col not in ordered_columns and col not in {"Durée_Minutes"}
+    ]
+    display_columns = ordered_columns + extra_columns
+    return table[display_columns]
+
+
+def _build_cause_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate unavailable events per translated (or original) cause."""
+
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["Cause", "Occurrences", "Durée (min)"])
+
+    work_df = df.copy()
+    work_df["Durée_Minutes"] = pd.to_numeric(
+        work_df.get("Durée_Minutes"), errors="coerce"
+    ).fillna(0).astype(int)
+    cause_column = "Cause Traduite" if "Cause Traduite" in work_df.columns else "Cause Originale"
+    causes = (
+        work_df.assign(
+            cause=work_df.get(cause_column, "").fillna("Cause non spécifiée").replace("", "Cause non spécifiée"),
+            duree=work_df["Durée_Minutes"],
+        )
+        .groupby("cause", dropna=False)
+        .agg(Occurrences=("duree", "count"), **{"Durée (min)": ("duree", "sum")})
+        .reset_index()
+        .rename(columns={"cause": "Cause"})
+        .sort_values(["Occurrences", "Durée (min)"], ascending=[False, False])
+    )
+    return causes
+
+
+def _prepare_report_summary(
+    report_data: Dict[str, pd.DataFrame],
+    equipments: List[str],
+) -> Tuple[pd.DataFrame, Dict[str, EquipmentReportDetail], Dict[str, Any]]:
+    """Prepare aggregated data used in the report tab."""
+
+    overview_rows: List[Dict[str, Any]] = []
+    equipment_details: Dict[str, EquipmentReportDetail] = {}
+    availability_values: List[float] = []
+    totals = {
+        "average_availability": 0.0,
+        "unavailable_events": 0,
+        "unavailable_minutes": 0,
+        "missing_events": 0,
+        "missing_minutes": 0,
+        "excluded_events": 0,
+        "excluded_minutes": 0,
+    }
+
+    for equip in equipments:
+        df = report_data.get(equip)
+        if df is None or df.empty:
+            equipment_details[equip] = EquipmentReportDetail(name=equip, summary={})
+            continue
+
+        work_df = df.copy()
+        if "Durée_Minutes" in work_df.columns:
+            work_df["Durée_Minutes"] = pd.to_numeric(
+                work_df["Durée_Minutes"], errors="coerce"
+            ).fillna(0).astype(int)
+
+        summary_row = work_df.loc[work_df["ID"] == "RÉSUMÉ"].head(1)
+        total_minutes = int(summary_row["Durée_Minutes"].iloc[0]) if not summary_row.empty else int(work_df.get("Durée_Minutes", pd.Series(dtype=int)).sum())
+
+        unavailable_df = work_df[work_df["ID"].str.startswith("IND", na=False)].copy()
+        missing_df = work_df[work_df["ID"].str.startswith("MISS", na=False)].copy()
+
+        unavailable_minutes = int(unavailable_df.get("Durée_Minutes", pd.Series(dtype=int)).sum()) if not unavailable_df.empty else 0
+        missing_minutes = int(missing_df.get("Durée_Minutes", pd.Series(dtype=int)).sum()) if not missing_df.empty else 0
+        available_minutes = max(total_minutes - unavailable_minutes - missing_minutes, 0)
+        availability_pct = (available_minutes / total_minutes * 100.0) if total_minutes > 0 else 0.0
+
+        unavailable_events = int(len(unavailable_df))
+        missing_events = int(len(missing_df))
+        excluded_mask = work_df.get("Exclu", pd.Series(dtype=str)).astype(str).str.contains("Oui", case=False, na=False)
+        excluded_events = int(excluded_mask.sum())
+        excluded_minutes = int(work_df.loc[excluded_mask, "Durée_Minutes"].sum()) if "Durée_Minutes" in work_df.columns and excluded_events else 0
+
+        summary = {
+            "total_minutes": total_minutes,
+            "available_minutes": available_minutes,
+            "unavailable_minutes": unavailable_minutes,
+            "missing_minutes": missing_minutes,
+            "availability_pct": availability_pct,
+            "unavailable_events": unavailable_events,
+            "missing_events": missing_events,
+            "excluded_events": excluded_events,
+            "excluded_minutes": excluded_minutes,
+        }
+
+        overview_rows.append(
+            {
+                "Équipement": equip,
+                "Disponibilité (%)": availability_pct,
+                "Durée Totale": format_minutes(total_minutes),
+                "Périodes d'indisponibilité": unavailable_events,
+                "Durée indisponible": format_minutes(unavailable_minutes),
+                "Périodes de données manquantes": missing_events,
+                "Durée manquante": format_minutes(missing_minutes),
+            }
+        )
+
+        availability_values.append(availability_pct)
+
+        detail = EquipmentReportDetail(
+            name=equip,
+            summary=summary,
+            raw_table=work_df,
+            unavailable_table=_format_report_table(unavailable_df),
+            missing_table=_format_report_table(missing_df),
+            causes_table=_build_cause_summary(unavailable_df),
+        )
+        equipment_details[equip] = detail
+
+        totals["unavailable_events"] += unavailable_events
+        totals["unavailable_minutes"] += unavailable_minutes
+        totals["missing_events"] += missing_events
+        totals["missing_minutes"] += missing_minutes
+        totals["excluded_events"] += excluded_events
+        totals["excluded_minutes"] += excluded_minutes
+
+    if availability_values:
+        totals["average_availability"] = sum(availability_values) / len(availability_values)
+
+    overview_df = pd.DataFrame(overview_rows)
+    if not overview_df.empty:
+        overview_df = overview_df.sort_values("Disponibilité (%)", ascending=False).reset_index(drop=True)
+
+    return overview_df, equipment_details, totals
+
+
+def _render_equipment_detail(detail: EquipmentReportDetail) -> None:
+    """Display the per-equipment analysis in the report tab."""
+
+    st.markdown(f"#### {detail.name}")
+    if not detail.summary:
+        st.info("ℹ️ Aucune donnée disponible pour cet équipement sur la période analysée.")
+        return
+
+    summary = detail.summary
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Disponibilité", f"{summary['availability_pct']:.2f}%")
+    with col2:
+        st.metric(
+            "Périodes indisponibles",
+            summary["unavailable_events"],
+            help=f"Durée cumulée : {format_minutes(summary['unavailable_minutes'])}",
+        )
+    with col3:
+        st.metric(
+            "Données manquantes",
+            summary["missing_events"],
+            help=f"Durée cumulée : {format_minutes(summary['missing_minutes'])}",
+        )
+    with col4:
+        st.metric(
+            "Blocs exclus",
+            summary["excluded_events"],
+            help=f"Durée cumulée : {format_minutes(summary['excluded_minutes'])}",
+        )
+
+    if not detail.causes_table.empty:
+        st.markdown("**Causes d'indisponibilité**")
+        st.dataframe(
+            detail.causes_table,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Cause": st.column_config.TextColumn("Cause", width="large"),
+                "Occurrences": st.column_config.NumberColumn("Occurrences", width="small"),
+                "Durée (min)": st.column_config.NumberColumn("Durée (min)", width="small"),
+            },
+        )
+    else:
+        st.success("✅ Aucune indisponibilité enregistrée pour cet équipement.")
+
+    st.markdown("**Périodes d'indisponibilité détaillées**")
+    if not detail.unavailable_table.empty:
+        st.dataframe(
+            detail.unavailable_table,
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("ℹ️ Aucun événement d'indisponibilité enregistré.")
+
+    st.markdown("**Périodes de données manquantes**")
+    if not detail.missing_table.empty:
+        st.dataframe(
+            detail.missing_table,
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.info("ℹ️ Aucune donnée manquante signalée.")
+
+    with st.expander("Voir l'ensemble des événements"):
+        st.dataframe(
+            _format_report_table(detail.raw_table),
+            hide_index=True,
+            use_container_width=True,
+        )
+
 
 def render_report_tab():
     """Affiche l'onglet rapport de disponibilité."""
@@ -5120,6 +5365,177 @@ def render_statistics_tab() -> None:
 
         if idx < len(selected_sites):
             st.divider()
+
+
+def render_global_comparison_tab(start_dt: datetime, end_dt: datetime) -> None:
+    """Affiche la comparaison globale multi-sites."""
+
+    st.header("🌍 Comparaison multi-sites")
+
+    all_sites = get_all_sites()
+    if not all_sites:
+        st.info("Aucun site disponible pour la comparaison globale.")
+        return
+
+    default_selection = st.session_state.get("global_comparison_sites")
+    if not default_selection:
+        default_selection = all_sites[: min(len(all_sites), 5)]
+
+    selected_sites = st.multiselect(
+        "Sites à comparer",
+        options=all_sites,
+        default=default_selection,
+        format_func=lambda code: mapping_sites.get(code.split("_")[-1], code),
+        help="Sélectionnez un ou plusieurs sites pour comparer leurs disponibilités.",
+    )
+
+    st.session_state["global_comparison_sites"] = selected_sites
+
+    if not selected_sites:
+        st.info("Sélectionnez au moins un site pour afficher la comparaison.")
+        return
+
+    def _collect_site_summary(site: str, mode: str) -> Dict[str, Any]:
+        mode_label = "Équipements" if mode == MODE_EQUIPMENT else "PDC"
+        site_label = mapping_sites.get(site.split("_")[-1], site)
+
+        try:
+            df = load_filtered_blocks(start_dt, end_dt, site, None, mode=mode)
+        except DatabaseError as exc:
+            logger.warning(
+                "Comparaison globale - chargement impossible pour %s (%s): %s",
+                site,
+                mode,
+                exc,
+            )
+            st.warning(
+                f"⚠️ Impossible de charger les données pour {site_label} ({mode_label})."
+            )
+            df = pd.DataFrame()
+
+        if df is None or df.empty:
+            return {
+                "Site": site,
+                "Libellé site": site_label,
+                "Mode": mode_label,
+                "Disponibilité brute (%)": 0.0,
+                "Disponibilité avec exclusions (%)": 0.0,
+                "Temps indisponible (min)": 0,
+                "Temps manquant (min)": 0,
+                "Temps analysé (min)": 0,
+                "Blocs indisponibles": 0,
+                "Blocs manquants": 0,
+                "Blocs exclus": 0,
+            }
+
+        work_df = df.copy()
+        stats_raw = calculate_availability(work_df, include_exclusions=False)
+        stats_excl = calculate_availability(work_df, include_exclusions=True)
+
+        status_series = work_df.get("est_disponible")
+        if status_series is not None:
+            unavailable_events = int((status_series == 0).sum())
+            missing_events = int((status_series == -1).sum())
+        else:
+            unavailable_events = 0
+            missing_events = 0
+
+        excluded_series = work_df.get("is_excluded")
+        excluded_events = int((excluded_series == 1).sum()) if excluded_series is not None else 0
+
+        return {
+            "Site": site,
+            "Libellé site": site_label,
+            "Mode": mode_label,
+            "Disponibilité brute (%)": float(stats_raw.get("pct_available", 0.0)),
+            "Disponibilité avec exclusions (%)": float(stats_excl.get("pct_available", 0.0)),
+            "Temps indisponible (min)": int(stats_excl.get("unavailable_minutes", 0)),
+            "Temps manquant (min)": int(stats_raw.get("missing_minutes", 0)),
+            "Temps analysé (min)": int(stats_excl.get("effective_minutes", 0)),
+            "Blocs indisponibles": unavailable_events,
+            "Blocs manquants": missing_events,
+            "Blocs exclus": excluded_events,
+        }
+
+    comparison_rows: List[Dict[str, Any]] = []
+    equipment_rows: List[Dict[str, Any]] = []
+    pdc_rows: List[Dict[str, Any]] = []
+
+    for site in selected_sites:
+        equip_row = _collect_site_summary(site, MODE_EQUIPMENT)
+        if equip_row:
+            comparison_rows.append(equip_row)
+            equipment_rows.append(equip_row)
+
+        pdc_row = _collect_site_summary(site, MODE_PDC)
+        if pdc_row:
+            comparison_rows.append(pdc_row)
+            pdc_rows.append(pdc_row)
+
+    comparison_df = pd.DataFrame(comparison_rows)
+    equipment_df = pd.DataFrame(equipment_rows)
+    pdc_df = pd.DataFrame(pdc_rows)
+
+    st.markdown("### 📊 Synthèse des disponibilités")
+    if not comparison_df.empty:
+        chart_df = comparison_df.copy()
+        chart_df["Libellé site"] = chart_df["Libellé site"].fillna(chart_df["Site"])
+        fig = px.bar(
+            chart_df,
+            x="Libellé site",
+            y="Disponibilité avec exclusions (%)",
+            color="Mode",
+            barmode="group",
+            category_orders={"Mode": ["Équipements", "PDC"]},
+        )
+        fig.update_layout(
+            yaxis_title="Disponibilité (%)",
+            xaxis_title="Site",
+            legend_title="Mode",
+            yaxis=dict(range=[0, 105]),
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.info("Aucune donnée disponible pour construire la comparaison.")
+
+    def _display_comparison_table(title: str, data: pd.DataFrame) -> None:
+        st.markdown(title)
+        if data.empty:
+            st.info("Aucune donnée disponible pour cette catégorie.")
+            return
+
+        display = data.drop(columns=["Mode"], errors="ignore").copy()
+        display["Disponibilité brute (%)"] = display["Disponibilité brute (%)"].map(lambda v: f"{v:.2f}%")
+        display["Disponibilité avec exclusions (%)"] = display["Disponibilité avec exclusions (%)"].map(lambda v: f"{v:.2f}%")
+
+        st.dataframe(
+            display,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Site": st.column_config.TextColumn("Code", width="small"),
+                "Libellé site": st.column_config.TextColumn("Libellé", width="medium"),
+                "Disponibilité brute (%)": st.column_config.TextColumn("Disponibilité brute", width="medium"),
+                "Disponibilité avec exclusions (%)": st.column_config.TextColumn("Disponibilité (exclusions)", width="medium"),
+                "Temps indisponible (min)": st.column_config.NumberColumn("Temps indisponible (min)", width="medium"),
+                "Temps manquant (min)": st.column_config.NumberColumn("Temps manquant (min)", width="medium"),
+                "Temps analysé (min)": st.column_config.NumberColumn("Temps analysé (min)", width="medium"),
+                "Blocs indisponibles": st.column_config.NumberColumn("Blocs indisponibles", width="small"),
+                "Blocs manquants": st.column_config.NumberColumn("Blocs manquants", width="small"),
+                "Blocs exclus": st.column_config.NumberColumn("Blocs exclus", width="small"),
+            },
+        )
+
+    col_left, col_right = st.columns(2)
+    with col_left:
+        _display_comparison_table("#### Équipements AC/DC", equipment_df)
+    with col_right:
+        _display_comparison_table("#### Points de charge (PDC)", pdc_df)
+
+    st.caption(
+        "Comparaison effectuée sur la période du "
+        f"{start_dt.strftime('%d/%m/%Y %H:%M')} au {end_dt.strftime('%d/%m/%Y %H:%M')}"
+    )
 
 
 def _render_statistics_pdf_export(
