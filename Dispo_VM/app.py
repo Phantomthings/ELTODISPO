@@ -2803,11 +2803,12 @@ def render_header():
             st.rerun()
 def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
     """Affiche les filtres et retourne les valeurs sélectionnées."""
-    current_mode = get_current_mode()
+    if get_current_mode() != MODE_EQUIPMENT:
+        set_current_mode(MODE_EQUIPMENT)
     st.subheader("🔍 Filtres de Recherche")
 
-    col1, col2, col_dates = st.columns([1, 1, 2])
-    with col1:
+    col_site, col_dates = st.columns([1, 2])
+    with col_site:
         equipment_sites = set(get_sites(MODE_EQUIPMENT) or [])
         pdc_sites = set(get_sites(MODE_PDC) or [])
         site_codes = sorted(equipment_sites.union(pdc_sites))
@@ -2828,61 +2829,6 @@ def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
             help="Sélectionnez un site"
         )
         site = selected_site
-
-    with col2:
-        equipments_with_mode: List[Tuple[str, str]] = []
-        if site:
-            equips_std = get_equipments(MODE_EQUIPMENT, site) or []
-            equips_pdc = get_equipments(MODE_PDC, site) or []
-        else:
-            equips_std = get_equipments(MODE_EQUIPMENT) or []
-            equips_pdc = get_equipments(MODE_PDC) or []
-
-        for equip_label in equips_std:
-            equipments_with_mode.append((equip_label, MODE_EQUIPMENT))
-        for equip_label in equips_pdc:
-            equipments_with_mode.append((equip_label, MODE_PDC))
-
-        if not equipments_with_mode:
-            st.warning("Aucun équipement ou point de charge pour ce site.")
-            return site, None, datetime.min, datetime.min
-
-        def _sort_key(item: Tuple[str, str]) -> Tuple[int, str]:
-            label, mode = item
-            equipment_order = {"AC": "0", "DC1": "1", "DC2": "2"}
-            if mode == MODE_EQUIPMENT:
-                return (0, equipment_order.get(label, label))
-            return (1, label)
-
-        equipments_with_mode.sort(key=_sort_key)
-
-        labels = [label for label, _ in equipments_with_mode]
-        mode_by_label = {label: mode for label, mode in equipments_with_mode}
-
-        previous_equip = st.session_state.get("current_equip")
-        equip_index = 0
-        if previous_equip in labels:
-            equip_index = labels.index(previous_equip)
-        elif current_mode == MODE_PDC:
-            # Préserver le mode lorsque l'équipement précédent n'est plus disponible
-            for idx, label in enumerate(labels):
-                if mode_by_label[label] == MODE_PDC:
-                    equip_index = idx
-                    break
-
-        selected_label = st.selectbox(
-            "Équipement / Point de charge",
-            options=labels,
-            index=equip_index,
-            help="Sélectionnez un équipement ou un point de charge"
-        )
-
-        selected_mode = mode_by_label.get(selected_label, MODE_EQUIPMENT)
-        if selected_mode != current_mode:
-            set_current_mode(selected_mode)
-            current_mode = selected_mode
-
-        equip = selected_label
 
     with col_dates:
         today = datetime.now(timezone.utc).date()
@@ -2958,6 +2904,7 @@ def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
     start_dt = datetime.combine(st.session_state["filter_start_date"], time.min)
     end_dt = datetime.combine(st.session_state["filter_end_date"], time.max)
 
+    equip = None
     return site, equip, start_dt, end_dt
 
 
