@@ -3244,202 +3244,44 @@ def render_global_comparison_tab(start_dt: datetime, end_dt: datetime) -> None:
         return
 
     if mode == MODE_EQUIPMENT:
-        st.subheader("Récap AC / BATT / PDC1-6")
-        if "type_equipement" not in df_all.columns:
-            st.info("Les données de type équipement ne sont pas disponibles pour cette vue.")
-            return
-
-        priority_types = [
-            "AC",
-            "BATT",
-            *[f"PDC{i}" for i in range(1, 7)],
-        ]
-        additional_types = [
-            t for t in df_all["type_equipement"].dropna().unique().tolist()
-            if t not in priority_types
-        ]
-        type_sequence = priority_types + additional_types
-
-        type_summaries: List[Dict[str, Optional[float]]] = []
-        for equip_type in type_sequence:
-            type_df = df_all[df_all["type_equipement"] == equip_type]
-            if type_df.empty:
-                continue
-
-            stats_raw = calculate_availability(type_df, include_exclusions=False)
-            stats_excl = calculate_availability(type_df, include_exclusions=True)
-            type_summaries.append(
+        st.subheader("Disponibilité par site")
+        site_rows: List[Dict[str, Optional[float]]] = []
+        for site, site_df in df_all.groupby("site"):
+            stats_raw = calculate_availability(site_df, include_exclusions=False)
+            stats_excl = calculate_availability(site_df, include_exclusions=True)
+            site_rows.append(
                 {
-                    "type": equip_type,
-                    "raw": round(stats_raw["pct_available"], 2),
-                    "excl": round(stats_excl["pct_available"], 2),
-                    "delta": round(stats_excl["pct_available"] - stats_raw["pct_available"], 2),
+                    "Site": mapping_sites.get(str(site).split("_")[-1], str(site)),
+                    "Disponibilité brute (%)": round(stats_raw["pct_available"], 2),
+                    "Disponibilité avec exclusions (%)": round(
+                        stats_excl["pct_available"], 2
+                    ),
                 }
             )
 
-        if not type_summaries:
-            st.info("Aucune donnée consolidée disponible pour les types d'équipement.")
-            return
-
-        st.markdown(
-            """
-            <style>
-            .availability-table {
-                width: 100%;
-                border-collapse: collapse;
-                border-spacing: 0;
-                margin-top: 1rem;
-                font-size: 0.95rem;
-            }
-            .availability-table thead th {
-                text-align: left;
-                padding: 0.75rem 1rem;
-                background: #f6f7f9;
-                color: #4a4a4a;
-                font-weight: 600;
-                border-bottom: 1px solid #e5e7eb;
-            }
-            .availability-table tbody tr td {
-                padding: 0.85rem 1rem;
-                border-bottom: 1px solid #eef1f4;
-                color: #1f2933;
-                font-weight: 500;
-            }
-            .availability-table tbody tr:last-child td {
-                border-bottom: none;
-            }
-            .availability-table .type-label {
-                display: inline-flex;
-                align-items: center;
-                gap: 0.5rem;
-                font-weight: 600;
-                color: #0f172a;
-            }
-            .availability-table .type-name {
-                font-size: 0.85rem;
-                font-weight: 500;
-                color: #475569;
-            }
-            .availability-table .type-badge {
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                height: 1.75rem;
-                min-width: 1.75rem;
-                padding: 0 0.65rem;
-                border-radius: 999px;
-                background: #eef2ff;
-                color: #3730a3;
-                font-size: 0.8rem;
-                font-weight: 600;
-            }
-            .availability-card {
-                background: linear-gradient(135deg, #f8fafc 0%, #ffffff 100%);
-                border: 1px solid #e5e7eb;
-                border-radius: 16px;
-                padding: 1.2rem 1.4rem;
-                box-shadow: 0 8px 16px rgba(15, 23, 42, 0.08);
-                margin-top: 1rem;
-            }
-            .availability-card .card-title {
-                color: #6b7280;
-                font-size: 0.85rem;
-                font-weight: 600;
-                margin-bottom: 0.5rem;
-            }
-            .availability-card .card-value {
-                font-size: 1.75rem;
-                font-weight: 700;
-                color: #0f172a;
-            }
-            .availability-card .card-subvalue {
-                margin-top: 0.25rem;
-                font-size: 0.85rem;
-                color: #475569;
-                font-weight: 500;
-            }
-            .availability-card .card-delta {
-                display: inline-flex;
-                align-items: center;
-                margin-top: 0.5rem;
-                padding: 0.25rem 0.6rem;
-                border-radius: 999px;
-                font-size: 0.75rem;
-                font-weight: 600;
-            }
-            .availability-card .card-delta.positive {
-                background: #ecfdf3;
-                color: #15803d;
-            }
-            .availability-card .card-delta.negative {
-                background: #fef2f2;
-                color: #b91c1c;
-            }
-            </style>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        table_rows = []
-        for summary in type_summaries:
-            table_rows.append(
-                """
-                <tr>
-                    <td>
-                        <span class="type-label">
-                            <span class="type-badge">{type_label}</span>
-                            <span class="type-name">Disponibilité agrégée</span>
-                        </span>
-                    </td>
-                    <td>{raw:.2f}%</td>
-                    <td>{excl:.2f}%</td>
-                </tr>
-                """.format(
-                    type_label=summary["type"],
-                    raw=summary["raw"],
-                    excl=summary["excl"],
-                )
+        summary_df = pd.DataFrame(site_rows)
+        if summary_df.empty:
+            st.info("Aucune donnée consolidée disponible pour les sites.")
+        else:
+            summary_df = summary_df.sort_values("Site").reset_index(drop=True)
+            st.dataframe(
+                summary_df,
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Site": st.column_config.TextColumn("Site", width="medium"),
+                    "Disponibilité brute (%)": st.column_config.NumberColumn(
+                        "Disponibilité brute (%)",
+                        width="medium",
+                        format="%.2f%%",
+                    ),
+                    "Disponibilité avec exclusions (%)": st.column_config.NumberColumn(
+                        "Disponibilité avec exclusions (%)",
+                        width="medium",
+                        format="%.2f%%",
+                    ),
+                },
             )
-
-        st.markdown(
-            f"""
-            <table class="availability-table">
-                <thead>
-                    <tr>
-                        <th>Type d'équipement</th>
-                        <th>Disponibilité brute</th>
-                        <th>Disponibilité avec exclusions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    {''.join(table_rows)}
-                </tbody>
-            </table>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        for idx in range(0, len(type_summaries), 2):
-            row_summaries = type_summaries[idx : idx + 2]
-            cols = st.columns(2)
-            for col, summary in zip(cols, row_summaries):
-                with col:
-                    delta = summary["delta"]
-                    delta_class = "positive" if delta >= 0 else "negative"
-                    delta_prefix = "+" if delta >= 0 else ""
-                    st.markdown(
-                        f"""
-                        <div class="availability-card">
-                            <div class="card-title">{summary['type']} · Disponibilité brute</div>
-                            <div class="card-value">{summary['raw']:.2f}%</div>
-                            <div class="card-subvalue">Avec exclusions : {summary['excl']:.2f}%</div>
-                            <div class="card-delta {delta_class}">
-                                {delta_prefix}{delta:.2f}% vs exclusions
-                            </div>
-                        </div>
-                        """,
-                        unsafe_allow_html=True,
-                    )
     else:
         st.subheader("Dispo globale par site")
         site_rows = []
