@@ -2874,7 +2874,8 @@ def render_filters() -> Tuple[Optional[str], Optional[str], datetime, datetime]:
             "Équipement / Point de charge",
             options=labels,
             index=equip_index,
-            help="Sélectionnez un équipement ou un point de charge"
+            help="Sélectionnez un équipement ou un point de charge",
+            label_visibility="collapsed"
         )
 
         selected_mode = mode_by_label.get(selected_label, MODE_EQUIPMENT)
