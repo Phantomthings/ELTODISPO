@@ -1909,19 +1909,29 @@ def calculate_availability(
     if include_exclusions:
         # Disponibilité avec exclusions = statut ACTUEL (modifié par les exclusions)
         status_series = df["est_disponible"].copy()
+        available_states = {1, 2, 3}
+        unavailable_states = {0}
     else:
         # Disponibilité brute = statut AVANT exclusions
         status_series = df["est_disponible"].copy()
-        
+        available_states = {1}
+        unavailable_states = {0, 2, 3}
+
         # Restaurer le statut précédent pour les blocs exclus
         if "is_excluded" in df.columns and "previous_status" in df.columns:
             # Pour les blocs exclus, prendre le previous_status
             mask_excluded = df["is_excluded"] == 1
             status_series = status_series.where(~mask_excluded, df["previous_status"])
-    
-    missing_minutes = int(df.loc[status_series == -1, "duration_minutes"].sum())
-    available = int(df.loc[status_series == 1, "duration_minutes"].sum())
-    unavailable = int(df.loc[status_series == 0, "duration_minutes"].sum())
+
+    status_series = pd.to_numeric(status_series, errors="coerce")
+
+    missing_mask = status_series == -1
+    available_mask = status_series.isin(available_states)
+    unavailable_mask = status_series.isin(unavailable_states)
+
+    missing_minutes = int(df.loc[missing_mask, "duration_minutes"].sum())
+    available = int(df.loc[available_mask, "duration_minutes"].sum())
+    unavailable = int(df.loc[unavailable_mask, "duration_minutes"].sum())
     effective_total = available + unavailable
     
     pct_available = (available / effective_total * 100) if effective_total > 0 else 0.0
@@ -1995,9 +2005,11 @@ def _build_station_timeline_df(timelines: Dict[str, pd.DataFrame]) -> pd.DataFra
     state_map = {
         1: "✅ Disponible",
         0: "❌ Indisponible",
+        2: "🔧 ELTO",
+        3: "⚡ Enedis",
         -1: "⚠️ Donnée manquante",
     }
-    timeline_df["state"] = timeline_df["est_disponible"].map(state_map).fillna("❓ Inconnu")
+    timeline_df["state"] = timeline_df["est_disponible"].map(state_map).fillna("ℹ️ Inconnu")
     timeline_df["label"] = timeline_df["state"]
     mask_excl = timeline_df["is_excluded"] == 1
     timeline_df.loc[mask_excl, "label"] = timeline_df.loc[mask_excl, "state"] + " (Exclu)"
@@ -2758,6 +2770,8 @@ def _status_display_label(value: Any) -> str:
     mapping = {
         1: "✅ Disponible",
         0: "❌ Indisponible",
+        2: "🔧 ELTO",
+        3: "⚡ Enedis",
         -1: "⚠️ Donnée manquante",
     }
     return mapping.get(value_int, "ℹ️ Inconnu")
@@ -2808,26 +2822,21 @@ def _build_ticket_url(ticket_value: Any) -> str:
 
 
 def get_timeline_color_map() -> Dict[str, str]:
-    """Couleurs utilisées pour la timeline détaillée."""
+    """Couleurs utilisées pour les timelines (station et détaillée)."""
 
-    base_colors = {
-        "✅ Disponible": "#28a745",
-        "❌ Indisponible": "#dc3545",
-        "⚠️ Donnée manquante": "#6c757d",
-        "ℹ️ Inconnu": "#17a2b8",
+    base_colors: Dict[str, Tuple[str, str]] = {
+        "✅ Disponible": ("#28a745", "#17a2b8"),
+        "❌ Indisponible": ("#dc3545", "#fd7e14"),
+        "⚠️ Donnée manquante": ("#6c757d", "#BBDB07"),
+        "🔧 ELTO": ("#0d6efd", "#6610f2"),
+        "⚡ Enedis": ("#ffc107", "#e0a800"),
+        "ℹ️ Inconnu": ("#17a2b8", "#6f42c1"),
     }
 
     color_map: Dict[str, str] = {}
-    for label, color in base_colors.items():
-        color_map[label] = color
-        if label == "✅ Disponible":
-            color_map[f"{label} (Exclu)"] = "#17a2b8"
-        elif label == "❌ Indisponible":
-            color_map[f"{label} (Exclu)"] = "#fd7e14"
-        elif label == "⚠️ Donnée manquante":
-            color_map[f"{label} (Exclu)"] = "#BBDB07"
-        else:
-            color_map[f"{label} (Exclu)"] = "#6f42c1"
+    for label, (normal_color, excluded_color) in base_colors.items():
+        color_map[label] = normal_color
+        color_map[f"{label} (Exclu)"] = excluded_color
 
     return color_map
 
@@ -3775,10 +3784,10 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
     )
 
     if mode == "Disponibles":
-        df_display = df_plot[df_plot["est_disponible"] == 1]
+        df_display = df_plot[df_plot["est_disponible"].isin({1, 2, 3})]
     elif mode == "Indisponibles":
         df_display = df_plot[df_plot["est_disponible"] == 0]
-    else:  
+    else:
         df_display = df_plot[df_plot["est_disponible"] == -1]
 
     if df_display.empty:
@@ -3788,12 +3797,19 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
 
         block_labels = []
         for idx, row in df_display.iterrows():
-            if row["est_disponible"] == -1:
-                status_icon = "⚠️"
-            elif row["est_disponible"] == 0:
-                status_icon = "❌"
-            else:
-                status_icon = "✅"
+            raw_status = row.get("est_disponible")
+            try:
+                status_value = int(raw_status)
+            except (TypeError, ValueError):
+                status_value = None
+
+            status_icon = {
+                -1: "⚠️",
+                0: "❌",
+                1: "✅",
+                2: "🔧",
+                3: "⚡",
+            }.get(status_value, "ℹ️")
 
             excl_tag = " [EXCLU]" if row["is_excluded"] == 1 else ""
             start_str = row["start"].strftime("%Y-%m-%d %H:%M")
@@ -5771,15 +5787,7 @@ def render_statistics_tab() -> None:
             if not available_order:
                 available_order = timeline_df["Equipement"].unique().tolist()
 
-            color_map = {
-                "✅ Disponible": "#28a745",
-                "❌ Indisponible": "#dc3545",
-                "❌ Indisponible (Exclu)": "#fd7e14",
-                "⚠️ Donnée manquante": "#6c757d",
-                "⚠️ Donnée manquante (Exclu)": "#BBDB07",
-                "❓ Inconnu": "#ff00b3",
-                "❓ Inconnu (Exclu)": "#D200E6",
-            }
+            color_map = get_timeline_color_map()
 
             fig = px.timeline(
                 timeline_df,
