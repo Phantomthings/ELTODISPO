@@ -3363,71 +3363,6 @@ def render_overview_tab(
                 "Comparaison de la disponibilité brute et après exclusions, calculée mois par mois sur la période analysée."
             )
 
-
-def render_global_comparison_tab(start_dt: datetime, end_dt: datetime) -> None:
-    st.header("🌍 Vue générale - Comparaison tous les sites")
-    st.caption(
-        f"Période analysée : {start_dt.strftime('%Y-%m-%d')} ➜ {end_dt.strftime('%Y-%m-%d')}"
-    )
-
-    monthly_df = load_stored_contract_monthly(start_dt, end_dt)
-
-    if monthly_df.empty:
-        st.warning("Aucune donnée disponible pour la vue globale sur la période sélectionnée.")
-        return
-
-    monthly_df["Site"] = monthly_df["Site"].str.replace("8822_", "").map(mapping_sites).fillna(monthly_df["Site"])
-
-    st.subheader("Dispo globale par site")
-    
-    site_rows = []
-    for site in sorted(monthly_df["Site"].unique()):
-        site_df = monthly_df[monthly_df["Site"] == site]
-        site_rows.append({
-            "Site": site,
-            "Disponibilité brute (%)": round(site_df["Disponibilité brute (%)"].mean(), 2),
-            "Disponibilité avec exclusions (%)": round(site_df["Disponibilité avec exclusions (%)"].mean(), 2),
-        })
-
-    summary_df = pd.DataFrame(site_rows)
-    if summary_df.empty:
-        st.info("Aucune donnée consolidée disponible pour les sites.")
-    else:
-        st.dataframe(
-            summary_df,
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Site": st.column_config.TextColumn("Site", width="medium"),
-                "Disponibilité brute (%)": st.column_config.NumberColumn(
-                    "Disponibilité brute (%)",
-                    width="medium",
-                    format="%.2f%%",
-                ),
-                "Disponibilité avec exclusions (%)": st.column_config.NumberColumn(
-                    "Disponibilité avec exclusions (%)",
-                    width="medium",
-                    format="%.2f%%",
-                ),
-            },
-        )
-
-    stats_all_raw = monthly_df["Disponibilité brute (%)"].mean()
-    stats_all_excl = monthly_df["Disponibilité avec exclusions (%)"].mean()
-    delta = stats_all_excl - stats_all_raw
-    
-    col1, col2 = st.columns(2)
-    col1.metric(
-        "Disponibilité brute globale",
-        f"{stats_all_raw:.2f}%",
-        help="Disponibilité brute moyenne de l'ensemble des sites",
-    )
-    col2.metric(
-        "Disponibilité avec exclusions globale",
-        f"{stats_all_excl:.2f}%",
-        delta=f"{delta:.2f}%",
-        help="Comparaison brute vs exclusions sur tous les sites",
-    )
 def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: datetime, end_dt: datetime):
     mode = get_current_mode()
     st.header("⏱️ Timeline Détaillée & Annotations")
@@ -3876,24 +3811,22 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
 
                     if submit_release:
                         release_txt = release_comment.strip()
-                        if len(release_txt) < 5:
-                            st.error("❌ Le commentaire doit contenir au moins 5 caractères.")
+
+                        try:
+                            result = release_block_exclusion(
+                                table_name=source_table,
+                                block_id=bloc_id,
+                                user=release_operator.strip() or None,
+                                comment=release_txt,
+                            )
+                        except ExclusionError as exc:
+                            st.error(f"❌ Impossible de lever l'exclusion : {exc}")
                         else:
-                            try:
-                                result = release_block_exclusion(
-                                    table_name=source_table,
-                                    block_id=bloc_id,
-                                    user=release_operator.strip() or None,
-                                    comment=release_txt,
-                                )
-                            except ExclusionError as exc:
-                                st.error(f"❌ Impossible de lever l'exclusion : {exc}")
-                            else:
-                                st.success(
-                                    f"✅ Bloc {result.block_id} restauré avec le statut {result.new_status} (table {result.table_name})."
-                                )
-                                st.balloons()
-                                st.rerun()
+                            st.success(
+                                f"✅ Bloc {result.block_id} restauré avec le statut {result.new_status} (table {result.table_name})."
+                            )
+                            st.balloons()
+                            st.rerun()
             else:
                 st.warning("Ce bloc est actuellement comptabilisé normalement.")
                 with st.form(f"apply_exclusion_{bloc_id}"):
@@ -3935,29 +3868,27 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
 
                     if submit_exclusion:
                         comment_txt = exclusion_comment.strip()
-                        if len(comment_txt) < 5:
-                            st.error("❌ Le commentaire doit contenir au moins 5 caractères.")
+
+                        try:
+                            result = apply_block_exclusion(
+                                table_name=source_table,
+                                block_id=bloc_id,
+                                user=exclusion_operator.strip() or None,
+                                comment=comment_txt,
+                                new_status=int(target_status),
+                            )
+                        except ExclusionError as exc:
+                            st.error(f"❌ Impossible de créer l'exclusion : {exc}")
                         else:
-                            try:
-                                result = apply_block_exclusion(
-                                    table_name=source_table,
-                                    block_id=bloc_id,
-                                    user=exclusion_operator.strip() or None,
-                                    comment=comment_txt,
-                                    new_status=int(target_status),
+                            st.success(
+                                "✅ Bloc {bloc} exclu et marqué {statut} (table {table}).".format(
+                                    bloc=result.block_id,
+                                    statut="disponible" if result.new_status == 1 else "indisponible",
+                                    table=result.table_name,
                                 )
-                            except ExclusionError as exc:
-                                st.error(f"❌ Impossible de créer l'exclusion : {exc}")
-                            else:
-                                st.success(
-                                    "✅ Bloc {bloc} exclu et marqué {statut} (table {table}).".format(
-                                        bloc=result.block_id,
-                                        statut="disponible" if result.new_status == 1 else "indisponible",
-                                        table=result.table_name,
-                                    )
-                                )
-                                st.balloons()
-                                st.rerun()
+                            )
+                            st.balloons()
+                            st.rerun()
 
             start_display = _format_timestamp_display(selected_row["start"])
             end_display = _format_timestamp_display(selected_row["end"])
@@ -4004,35 +3935,32 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
             
             if submit_comment:
                 comment_txt = comment_text.strip()
-                if len(comment_txt) < 5:
-                    st.error("❌ Le commentaire doit contenir au moins 5 caractères.")
-                else:
-                    try:
-                        # Récupérez le site et l'équipement depuis la session
-                        site = st.session_state.get("current_site", "")
-                        equipement = st.session_state.get("current_equip", "")
-                        
-                        # Utilisez directement les dates du bloc sélectionné
-                        success = create_annotation(
-                            site=site,
-                            equip=equipement,
-                            start_dt=selected_row["start"],
-                            end_dt=selected_row["end"],
-                            annotation_type="commentaire",
-                            comment=comment_txt,
-                            user=comment_operator.strip() or "ui",
-                            cascade=False
-                        )
-                        
-                        if success:
-                            st.success(f"✅ Commentaire ajouté avec succès !")
-                            st.balloons()
-                            st.rerun()
-                        else:
-                            st.error("❌ Échec de l'ajout du commentaire.")
-                        
-                    except Exception as exc:
-                        st.error(f"❌ Impossible d'ajouter le commentaire : {exc}")
+                try:
+                    # Récupérez le site et l'équipement depuis la session
+                    site = st.session_state.get("current_site", "")
+                    equipement = st.session_state.get("current_equip", "")
+                    
+                    # Utilisez directement les dates du bloc sélectionné
+                    success = create_annotation(
+                        site=site,
+                        equip=equipement,
+                        start_dt=selected_row["start"],
+                        end_dt=selected_row["end"],
+                        annotation_type="commentaire",
+                        comment=comment_txt,
+                        user=comment_operator.strip() or "ui",
+                        cascade=False
+                    )
+                    
+                    if success:
+                        st.success(f"✅ Commentaire ajouté avec succès !")
+                        st.balloons()
+                        st.rerun()
+                    else:
+                        st.error("❌ Échec de l'ajout du commentaire.")
+                    
+                except Exception as exc:
+                    st.error(f"❌ Impossible d'ajouter le commentaire : {exc}")
     
 def render_exclusions_tab():
     mode = get_current_mode()
@@ -5564,8 +5492,69 @@ def render_contract_tab(site: Optional[str], start_dt: datetime, end_dt: datetim
                 f"Dernière mise à jour contractuelle : {last_update.strftime('%Y-%m-%d %H:%M')}"
             )
 
+    
     st.subheader("📈 Évolution des disponibilités")
+    st.caption(
+            f"Période analysée : {start_dt.strftime('%Y-%m-%d')} ➜ {end_dt.strftime('%Y-%m-%d')}"
+        )
 
+    monthly_df = load_stored_contract_monthly(start_dt, end_dt)
+    if monthly_df.empty:
+        st.warning("Aucune donnée disponible pour la vue globale sur la période sélectionnée.")
+        return
+
+    monthly_df["Site"] = monthly_df["Site"].str.replace("8822_", "").map(mapping_sites).fillna(monthly_df["Site"])
+
+    st.subheader("Dispo globale par site")
+    
+    site_rows = []
+    for site in sorted(monthly_df["Site"].unique()):
+        site_df = monthly_df[monthly_df["Site"] == site]
+        site_rows.append({
+            "Site": site,
+            "Disponibilité brute (%)": round(site_df["Disponibilité brute (%)"].mean(), 2),
+            "Disponibilité avec exclusions (%)": round(site_df["Disponibilité avec exclusions (%)"].mean(), 2),
+        })
+
+    summary_df = pd.DataFrame(site_rows)
+    if summary_df.empty:
+        st.info("Aucune donnée consolidée disponible pour les sites.")
+    else:
+        st.dataframe(
+            summary_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Site": st.column_config.TextColumn("Site", width="medium"),
+                "Disponibilité brute (%)": st.column_config.NumberColumn(
+                    "Disponibilité brute (%)",
+                    width="medium",
+                    format="%.2f%%",
+                ),
+                "Disponibilité avec exclusions (%)": st.column_config.NumberColumn(
+                    "Disponibilité avec exclusions (%)",
+                    width="medium",
+                    format="%.2f%%",
+                ),
+            },
+        )
+
+    stats_all_raw = monthly_df["Disponibilité brute (%)"].mean()
+    stats_all_excl = monthly_df["Disponibilité avec exclusions (%)"].mean()
+    delta = stats_all_excl - stats_all_raw
+    
+    col1, col2 = st.columns(2)
+    col1.metric(
+        "Disponibilité brute globale",
+        f"{stats_all_raw:.2f}%",
+        help="Disponibilité brute moyenne de l'ensemble des sites",
+    )
+    col2.metric(
+        "Disponibilité avec exclusions globale",
+        f"{stats_all_excl:.2f}%",
+        delta=f"{delta:.2f}%",
+        help="Comparaison brute vs exclusions sur tous les sites",
+    )
     tabs = st.tabs(["Disponibilité brute", "Disponibilité avec exclusions"])
 
     with tabs[0]:
@@ -6200,7 +6189,6 @@ def main():
     tabs = st.tabs([
         "📈 Vue d'ensemble",
         "📊 Timeline - Exclusions/annotations rapides",
-        "🌍 Comparaison sites",
         "⏱️ Timeline & Annotations - Équipement",
         "📊 Rapport",
         "🚫 Exclusions",
@@ -6216,24 +6204,21 @@ def main():
         render_statistics_tab()
 
     with tabs[2]:
-        render_global_comparison_tab(start_dt, end_dt)
-
-    with tabs[3]:
         render_timeline_tab(site, equip, start_dt, end_dt)
 
-    with tabs[4]:
+    with tabs[3]:
         render_report_tab()
 
-    with tabs[5]:
+    with tabs[4]:
         render_exclusions_tab()
 
-    with tabs[6]:
+    with tabs[5]:
         render_comments_tab()
 
-    with tabs[7]:
+    with tabs[6]:
         calcul()
 
-    with tabs[8]:
+    with tabs[7]:
         render_contract_tab(site, start_dt, end_dt)
 
     st.divider()
