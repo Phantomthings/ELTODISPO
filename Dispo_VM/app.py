@@ -3713,14 +3713,12 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
 
     mode = st.radio(
         "Afficher",
-        options=["Disponibles", "Indisponibles", "Données manquantes"],
-        index=1,           
+        options=["Indisponibles", "Données manquantes"],
+        index=0,
         horizontal=True
     )
 
-    if mode == "Disponibles":
-        df_display = df_plot[df_plot["est_disponible"].isin({1, 2, 3})]
-    elif mode == "Indisponibles":
+    if mode == "Indisponibles":
         df_display = df_plot[df_plot["est_disponible"] == 0]
     else:
         df_display = df_plot[df_plot["est_disponible"] == -1]
