@@ -5,6 +5,7 @@ import re
 import calendar
 import subprocess
 import sys
+import numbers
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
 from itertools import cycle
@@ -12,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Set, Callable
 import logging
 from zoneinfo import ZoneInfo
+import inspect as pyinspect
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -71,6 +73,7 @@ ALL_EQUIPMENT_CHOICES = [
     "DC2",
 ]
 GENERIC_SCOPE_TOKENS = ("tous", "toutes", "all", "global", "ensemble", "général", "general")
+TICKET_URL_TEMPLATE = "https://elto.nidec-asi-online.com/Ticket/{}/show"
 
 
 def _all_equipment_options() -> List[str]:
@@ -2760,6 +2763,50 @@ def _status_display_label(value: Any) -> str:
     return mapping.get(value_int, "ℹ️ Inconnu")
 
 
+def _normalize_ticket_value(ticket_value: Any) -> Optional[str]:
+    """Normalise un identifiant de ticket en chaîne de caractères utilisable."""
+
+    if ticket_value is None:
+        return None
+
+    if isinstance(ticket_value, str):
+        normalized = ticket_value.strip()
+        return normalized or None
+
+    if isinstance(ticket_value, numbers.Integral):
+        return str(int(ticket_value))
+
+    if isinstance(ticket_value, numbers.Real):
+        try:
+            if math.isnan(ticket_value):
+                return None
+        except TypeError:
+            pass
+        numeric_value = float(ticket_value)
+        if numeric_value.is_integer():
+            return str(int(numeric_value))
+        return str(numeric_value)
+
+    normalized = str(ticket_value).strip()
+    return normalized or None
+
+
+def _normalize_ticket_display(ticket_value: Any) -> str:
+    """Formate l'identifiant du ticket pour l'affichage dans l'interface."""
+
+    normalized = _normalize_ticket_value(ticket_value)
+    return normalized if normalized is not None else "—"
+
+
+def _build_ticket_url(ticket_value: Any) -> str:
+    """Construit l'URL du ticket ELTO associé."""
+
+    normalized = _normalize_ticket_value(ticket_value)
+    if not normalized:
+        return ""
+    return TICKET_URL_TEMPLATE.format(normalized)
+
+
 def get_timeline_color_map() -> Dict[str, str]:
     """Couleurs utilisées pour la timeline détaillée."""
 
@@ -3522,6 +3569,84 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
     )
 
     st.plotly_chart(fig, use_container_width=True)
+
+    st.markdown("**🎫 Blocs associés à un ticket :**")
+
+    ticket_series = df.get("ticket_id")
+    if ticket_series is None:
+        ticket_blocks = pd.DataFrame()
+    else:
+        normalized_tickets = ticket_series.map(_normalize_ticket_value)
+        valid_mask = normalized_tickets.notna()
+        ticket_blocks = df.loc[valid_mask].copy()
+
+    if ticket_blocks.empty:
+        st.info("Aucun bloc n'est associé à un ticket ELTO sur la période affichée.")
+    else:
+        ticket_blocks_display = ticket_blocks.copy()
+        ticket_blocks_display["Début"] = pd.to_datetime(ticket_blocks_display["date_debut"]).dt.strftime("%Y-%m-%d %H:%M")
+        ticket_blocks_display["Fin"] = pd.to_datetime(ticket_blocks_display["date_fin"]).dt.strftime("%Y-%m-%d %H:%M")
+        ticket_blocks_display["Statut"] = ticket_blocks_display["est_disponible"].apply(_status_display_label)
+        ticket_blocks_display["Ticket"] = ticket_blocks_display["ticket_id"].apply(_normalize_ticket_display)
+
+        if "ICPC" in ticket_blocks_display.columns:
+            ticket_blocks_display["IC/PC"] = ticket_blocks_display["ICPC"].apply(
+                lambda value: "—" if (pd.isna(value) or str(value).strip() == "") else str(value).strip()
+            )
+        else:
+            ticket_blocks_display["IC/PC"] = "—"
+
+        display_columns = [
+            "Ticket",
+            "Début",
+            "Fin",
+            "Statut",
+            "IC/PC",
+        ]
+
+        column_config: Dict[str, Any] = {
+            "Début": st.column_config.TextColumn("Début", width="medium"),
+            "Fin": st.column_config.TextColumn("Fin", width="medium"),
+            "Statut": st.column_config.TextColumn("Statut", width="medium"),
+            "IC/PC": st.column_config.TextColumn("IC/PC", width="medium"),
+        }
+
+        try:
+            link_column_signature = pyinspect.signature(st.column_config.LinkColumn)
+            supports_ticket_url = "url" in link_column_signature.parameters
+        except (AttributeError, TypeError, ValueError):
+            supports_ticket_url = False
+
+        ticket_help = "Ouvrir le ticket sur la plateforme ELTO"
+
+        if supports_ticket_url:
+            column_config["Ticket"] = st.column_config.LinkColumn(
+                "Ticket",
+                width="small",
+                help=ticket_help,
+                url=TICKET_URL_TEMPLATE,
+            )
+        else:
+            column_config["Ticket"] = st.column_config.TextColumn(
+                "Ticket",
+                width="small",
+                help="Identifiant du ticket ELTO",
+            )
+
+            link_column_name = "Ouvrir"
+            ticket_blocks_display.insert(1, link_column_name, ticket_blocks_display["Ticket"].map(_build_ticket_url))
+            display_columns.insert(1, link_column_name)
+            column_config[link_column_name] = st.column_config.LinkColumn(
+                link_column_name,
+                help=ticket_help,
+            )
+
+        st.dataframe(
+            ticket_blocks_display[display_columns],
+            hide_index=True,
+            use_container_width=True,
+            column_config=column_config,
+        )
 
     # Tableau des vraies périodes d'indisponibilité (groupées)
     st.markdown("**📋 Périodes d'Indisponibilité Continues :**")
