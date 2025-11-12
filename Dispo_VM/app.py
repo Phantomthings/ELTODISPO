@@ -3912,6 +3912,41 @@ def render_exclusions_tab():
     else:
         status_map = {1: "Disponible", 0: "Indisponible", -1: "Donnée manquante"}
 
+        selection_state_key = "active_exclusion_selected_ids"
+        if selection_state_key not in st.session_state:
+            st.session_state[selection_state_key] = []
+
+        all_exclusion_ids = df_active["id"].astype(int).tolist()
+
+        stored_selection_ids: List[int] = []
+        for value in st.session_state.get(selection_state_key, []):
+            try:
+                candidate = int(value)
+            except (TypeError, ValueError):
+                continue
+            if candidate in all_exclusion_ids and candidate not in stored_selection_ids:
+                stored_selection_ids.append(candidate)
+
+        actions_col1, actions_col2 = st.columns(2)
+        with actions_col1:
+            if st.button(
+                "Tout sélectionner",
+                key="active_exclusion_select_all",
+                use_container_width=True,
+                disabled=not all_exclusion_ids,
+            ):
+                st.session_state[selection_state_key] = all_exclusion_ids
+                st.rerun()
+        with actions_col2:
+            if st.button(
+                "Tout désélectionner",
+                key="active_exclusion_clear",
+                use_container_width=True,
+                disabled=not stored_selection_ids,
+            ):
+                st.session_state[selection_state_key] = []
+                st.rerun()
+
         def _format_applied_at(value: Any) -> str:
             timestamp = pd.to_datetime(value, errors="coerce")
             if pd.isna(timestamp):
@@ -3970,9 +4005,11 @@ def render_exclusions_tab():
                 start_raw.append(None)
                 end_raw.append(None)
 
+        selection_flags = [exclusion_id in stored_selection_ids for exclusion_id in all_exclusion_ids]
+
         df_active_display = pd.DataFrame(
             {
-                "Sélection": [False] * len(df_active),
+                "Sélection": selection_flags,
                 "ID exclusion": df_active["id"].astype(int),
                 "Table": df_active["table_name"],
                 "Bloc": df_active["bloc_id"].astype(int),
@@ -4023,6 +4060,9 @@ def render_exclusions_tab():
             for _, row in edited_active.iterrows()
             if bool(row.get("Sélection"))
         ]
+
+        if set(selected_ids) != set(stored_selection_ids):
+            st.session_state[selection_state_key] = selected_ids
 
         if selected_ids:
             st.info(
@@ -5650,26 +5690,33 @@ def render_statistics_tab() -> None:
         if idx < len(selected_sites):
             st.divider()
     with st.expander("⚡ Exclusion rapide des données manquantes", expanded=False):
-            month_default = datetime.now(ZoneInfo("Europe/Zurich")).date().replace(day=1)
-            month_candidates = [
-                ts.to_pydatetime().date() for ts in pd.date_range(end=month_default, periods=12, freq="MS")
-            ]
-            month_candidates.reverse()
-            default_index = month_candidates.index(month_default) if month_default in month_candidates else 0
-            target_month = st.selectbox(
-                "Mois concerné",
-                options=month_candidates,
-                index=default_index,
-                format_func=lambda d: d.strftime("%Y-%m"),
-                key="timeline_missing_month_picker",
-                help="Choisissez un mois pour exclure automatiquement toutes les données manquantes.",
+            today = datetime.now(ZoneInfo("Europe/Zurich")).date()
+            default_start = today.replace(day=1)
+            if default_start.month == 12:
+                default_end = default_start.replace(year=default_start.year + 1, month=1) - timedelta(days=1)
+            else:
+                default_end = default_start.replace(month=default_start.month + 1) - timedelta(days=1)
+
+            start_end = st.date_input(
+                "Intervalle concerné",
+                value=(default_start, default_end),
+                key="timeline_missing_interval_picker",
+                help="Sélectionnez une période pour exclure automatiquement toutes les données manquantes.",
             )
 
-            month_start = target_month.replace(day=1)
-            if month_start.month == 12:
-                next_month = month_start.replace(year=month_start.year + 1, month=1)
+            if isinstance(start_end, tuple) and len(start_end) == 2:
+                range_start, range_end = start_end
             else:
-                next_month = month_start.replace(month=month_start.month + 1)
+                range_start = default_start
+                range_end = default_end
+
+            start_candidate = pd.to_datetime(range_start)
+            end_candidate = pd.to_datetime(range_end)
+            if start_candidate > end_candidate:
+                start_candidate, end_candidate = end_candidate, start_candidate
+
+            range_start = start_candidate.date()
+            range_end = end_candidate.date()
 
             st.markdown("**Sites concernés par l'exclusion automatique**")
             exclusion_sites = ["AC", "DC1", "DC2", "PDC1", "PDC2", "PDC3", "PDC4", "PDC5", "PDC6"]
@@ -5682,17 +5729,23 @@ def render_statistics_tab() -> None:
 
             st.session_state["timeline_missing_selected_sites"] = selected_sites
 
-            default_comment = f"Exclusion automatique données manquantes {month_start.strftime('%Y-%m')}"
+            range_start = range_start or default_start
+            range_end = range_end or default_end
+
+            default_comment = (
+                "Exclusion automatique données manquantes "
+                f"{range_start.strftime('%Y-%m-%d')} → {range_end.strftime('%Y-%m-%d')}"
+            )
             bulk_comment = st.text_input(
                 "Commentaire appliqué",
                 value=default_comment,
-                key="timeline_missing_month_comment",
+                key="timeline_missing_interval_comment",
                 help="Le commentaire sera répliqué sur chaque exclusion créée.",
             )
             bulk_user = st.text_input(
                 "Créé par",
                 placeholder="Votre nom",
-                key="timeline_missing_month_user",
+                key="timeline_missing_interval_user",
             )
 
             col_apply_available, col_apply_unavailable = st.columns(2)
@@ -5722,8 +5775,8 @@ def render_statistics_tab() -> None:
                             st.error("Le commentaire doit contenir au moins 5 caractères.")
                         else:
                             user_txt = (bulk_user or "").strip()
-                            start_dt = datetime.combine(month_start, time.min)
-                            end_dt = datetime.combine(next_month, time.min)
+                            start_dt = datetime.combine(range_start, time.min)
+                            end_dt = datetime.combine(range_end + timedelta(days=1), time.min)
                             new_status = 1 if trigger_available else 0
                             status_label = "disponible" if new_status == 1 else "indisponible"
 
@@ -5796,26 +5849,33 @@ def render_statistics_tab() -> None:
                                     )
 
     with st.expander("⚡ Exclusion rapide des blocs indisponibles", expanded=False):
-            month_default = datetime.now(ZoneInfo("Europe/Zurich")).date().replace(day=1)
-            month_candidates = [
-                ts.to_pydatetime().date() for ts in pd.date_range(end=month_default, periods=12, freq="MS")
-            ]
-            month_candidates.reverse()
-            default_index = month_candidates.index(month_default) if month_default in month_candidates else 0
-            target_month = st.selectbox(
-                "Mois concerné",
-                options=month_candidates,
-                index=default_index,
-                format_func=lambda d: d.strftime("%Y-%m"),
-                key="timeline_unavailable_month_picker",
-                help="Choisissez un mois pour exclure automatiquement tous les blocs indisponibles.",
+            today = datetime.now(ZoneInfo("Europe/Zurich")).date()
+            default_start = today.replace(day=1)
+            if default_start.month == 12:
+                default_end = default_start.replace(year=default_start.year + 1, month=1) - timedelta(days=1)
+            else:
+                default_end = default_start.replace(month=default_start.month + 1) - timedelta(days=1)
+
+            start_end = st.date_input(
+                "Intervalle concerné",
+                value=(default_start, default_end),
+                key="timeline_unavailable_interval_picker",
+                help="Sélectionnez une période pour exclure automatiquement tous les blocs indisponibles.",
             )
 
-            month_start = target_month.replace(day=1)
-            if month_start.month == 12:
-                next_month = month_start.replace(year=month_start.year + 1, month=1)
+            if isinstance(start_end, tuple) and len(start_end) == 2:
+                range_start, range_end = start_end
             else:
-                next_month = month_start.replace(month=month_start.month + 1)
+                range_start = default_start
+                range_end = default_end
+
+            start_candidate = pd.to_datetime(range_start)
+            end_candidate = pd.to_datetime(range_end)
+            if start_candidate > end_candidate:
+                start_candidate, end_candidate = end_candidate, start_candidate
+
+            range_start = start_candidate.date()
+            range_end = end_candidate.date()
 
             st.markdown("**Sites concernés par l'exclusion automatique**")
             exclusion_sites = ["AC", "DC1", "DC2", "PDC1", "PDC2", "PDC3", "PDC4", "PDC5", "PDC6"]
@@ -5828,17 +5888,23 @@ def render_statistics_tab() -> None:
 
             st.session_state["timeline_unavailable_selected_sites"] = selected_sites
 
-            default_comment = f"Exclusion automatique blocs indisponibles {month_start.strftime('%Y-%m')}"
+            range_start = range_start or default_start
+            range_end = range_end or default_end
+
+            default_comment = (
+                "Exclusion automatique blocs indisponibles "
+                f"{range_start.strftime('%Y-%m-%d')} → {range_end.strftime('%Y-%m-%d')}"
+            )
             bulk_comment = st.text_input(
                 "Commentaire appliqué",
                 value=default_comment,
-                key="timeline_unavailable_month_comment",
+                key="timeline_unavailable_interval_comment",
                 help="Le commentaire sera répliqué sur chaque exclusion créée.",
             )
             bulk_user = st.text_input(
                 "Créé par",
                 placeholder="Votre nom",
-                key="timeline_unavailable_month_user",
+                key="timeline_unavailable_interval_user",
             )
 
             col_apply_available, col_apply_unavailable = st.columns(2)
@@ -5868,8 +5934,8 @@ def render_statistics_tab() -> None:
                             st.error("Le commentaire doit contenir au moins 5 caractères.")
                         else:
                             user_txt = (bulk_user or "").strip()
-                            start_dt = datetime.combine(month_start, time.min)
-                            end_dt = datetime.combine(next_month, time.min)
+                            start_dt = datetime.combine(range_start, time.min)
+                            end_dt = datetime.combine(range_end + timedelta(days=1), time.min)
                             new_status = 1 if trigger_available else 0
                             status_label = "disponible" if new_status == 1 else "indisponible"
 
