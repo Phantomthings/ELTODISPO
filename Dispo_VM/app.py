@@ -1115,7 +1115,7 @@ def load_filtered_blocks(start_dt: datetime, end_dt: datetime, site: Optional[st
     return _load_filtered_blocks_equipment(start_dt, end_dt, site, equip)
 
 
-def _bulk_exclude_missing_blocks(
+def _bulk_exclude_blocks_by_status(
     *,
     site: str,
     equip: str,
@@ -1124,7 +1124,9 @@ def _bulk_exclude_missing_blocks(
     new_status: int,
     comment: str,
     user: Optional[str],
+    target_status: int,
 ) -> Tuple[int, int, List[str]]:
+    """Create exclusions for blocks matching a specific status."""
     mode = MODE_PDC if equip.upper().startswith("PDC") else MODE_EQUIPMENT
 
     try:
@@ -1135,16 +1137,16 @@ def _bulk_exclude_missing_blocks(
     if df_blocks.empty:
         return 0, 0, []
 
-    mask_missing = (df_blocks["est_disponible"] == -1) & (df_blocks["is_excluded"] == 0)
-    missing_blocks = df_blocks.loc[mask_missing]
+    mask_status = (df_blocks["est_disponible"] == target_status) & (df_blocks["is_excluded"] == 0)
+    status_blocks = df_blocks.loc[mask_status]
 
-    if missing_blocks.empty:
+    if status_blocks.empty:
         return 0, 0, []
 
     created = 0
     errors: List[str] = []
 
-    for _, block in missing_blocks.iterrows():
+    for _, block in status_blocks.iterrows():
         table_name = str(block.get("source_table") or "").strip()
         try:
             block_id = int(block.get("bloc_id", -1))
@@ -1167,7 +1169,51 @@ def _bulk_exclude_missing_blocks(
         except ExclusionError as exc:
             errors.append(f"{equip} · bloc {block_id}: {exc}")
 
-    return created, len(missing_blocks), errors
+    return created, len(status_blocks), errors
+
+
+def _bulk_exclude_missing_blocks(
+    *,
+    site: str,
+    equip: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    new_status: int,
+    comment: str,
+    user: Optional[str],
+) -> Tuple[int, int, List[str]]:
+    return _bulk_exclude_blocks_by_status(
+        site=site,
+        equip=equip,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        new_status=new_status,
+        comment=comment,
+        user=user,
+        target_status=-1,
+    )
+
+
+def _bulk_exclude_unavailable_blocks(
+    *,
+    site: str,
+    equip: str,
+    start_dt: datetime,
+    end_dt: datetime,
+    new_status: int,
+    comment: str,
+    user: Optional[str],
+) -> Tuple[int, int, List[str]]:
+    return _bulk_exclude_blocks_by_status(
+        site=site,
+        equip=equip,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        new_status=new_status,
+        comment=comment,
+        user=user,
+        target_status=0,
+    )
 
 # Gestion
 def _insert_annotation(
@@ -5747,6 +5793,152 @@ def render_statistics_tab() -> None:
                                 if not info_messages and not error_messages:
                                     st.info(
                                         "Aucune donnée manquante à exclure pour la période et la sélection indiquées."
+                                    )
+
+    with st.expander("⚡ Exclusion rapide des blocs indisponibles", expanded=False):
+            month_default = datetime.now(ZoneInfo("Europe/Zurich")).date().replace(day=1)
+            month_candidates = [
+                ts.to_pydatetime().date() for ts in pd.date_range(end=month_default, periods=12, freq="MS")
+            ]
+            month_candidates.reverse()
+            default_index = month_candidates.index(month_default) if month_default in month_candidates else 0
+            target_month = st.selectbox(
+                "Mois concerné",
+                options=month_candidates,
+                index=default_index,
+                format_func=lambda d: d.strftime("%Y-%m"),
+                key="timeline_unavailable_month_picker",
+                help="Choisissez un mois pour exclure automatiquement tous les blocs indisponibles.",
+            )
+
+            month_start = target_month.replace(day=1)
+            if month_start.month == 12:
+                next_month = month_start.replace(year=month_start.year + 1, month=1)
+            else:
+                next_month = month_start.replace(month=month_start.month + 1)
+
+            st.markdown("**Sites concernés par l'exclusion automatique**")
+            exclusion_sites = ["AC", "DC1", "DC2", "PDC1", "PDC2", "PDC3", "PDC4", "PDC5", "PDC6"]
+            site_columns = st.columns(3)
+            selected_sites = []
+            for idx, site_label in enumerate(exclusion_sites):
+                col = site_columns[idx % len(site_columns)]
+                if col.checkbox(site_label, key=f"timeline_unavailable_site_{site_label.lower()}"):
+                    selected_sites.append(site_label)
+
+            st.session_state["timeline_unavailable_selected_sites"] = selected_sites
+
+            default_comment = f"Exclusion automatique blocs indisponibles {month_start.strftime('%Y-%m')}"
+            bulk_comment = st.text_input(
+                "Commentaire appliqué",
+                value=default_comment,
+                key="timeline_unavailable_month_comment",
+                help="Le commentaire sera répliqué sur chaque exclusion créée.",
+            )
+            bulk_user = st.text_input(
+                "Créé par",
+                placeholder="Votre nom",
+                key="timeline_unavailable_month_user",
+            )
+
+            col_apply_available, col_apply_unavailable = st.columns(2)
+            trigger_available = col_apply_available.button(
+                "✅ Exclure comme disponible",
+                key="timeline_unavailable_exclude_available",
+                use_container_width=True,
+            )
+            trigger_unavailable = col_apply_unavailable.button(
+                "❌ Exclure comme indisponible",
+                key="timeline_unavailable_exclude_unavailable",
+                use_container_width=True,
+            )
+
+            if trigger_available or trigger_unavailable:
+                if not selected_sites:
+                    st.warning("Sélectionnez au moins un équipement à traiter.")
+                else:
+                    site_scope = st.session_state.get("current_site")
+                    if not site_scope:
+                        st.error(
+                            "Sélectionnez un site spécifique dans les filtres avant d'utiliser l'exclusion automatique."
+                        )
+                    else:
+                        comment_txt = (bulk_comment or "").strip()
+                        if len(comment_txt) < 5:
+                            st.error("Le commentaire doit contenir au moins 5 caractères.")
+                        else:
+                            user_txt = (bulk_user or "").strip()
+                            start_dt = datetime.combine(month_start, time.min)
+                            end_dt = datetime.combine(next_month, time.min)
+                            new_status = 1 if trigger_available else 0
+                            status_label = "disponible" if new_status == 1 else "indisponible"
+
+                            available_equips = {s.upper() for s in get_equipments(MODE_EQUIPMENT, site_scope) or []}
+                            available_pdc = {s.upper() for s in get_equipments(MODE_PDC, site_scope) or []}
+
+                            total_created = 0
+                            total_candidates = 0
+                            info_messages: List[str] = []
+                            error_messages: List[str] = []
+
+                            with st.spinner("Application des exclusions automatiques..."):
+                                for equip_label in selected_sites:
+                                    equip_upper = equip_label.upper()
+                                    mode = MODE_PDC if equip_upper.startswith("PDC") else MODE_EQUIPMENT
+
+                                    if mode == MODE_PDC and equip_upper not in available_pdc:
+                                        info_messages.append(
+                                            f"{equip_label}: aucun point de charge correspondant pour le site sélectionné."
+                                        )
+                                        continue
+
+                                    if mode == MODE_EQUIPMENT and equip_upper not in available_equips:
+                                        info_messages.append(
+                                            f"{equip_label}: équipement indisponible sur le site sélectionné."
+                                        )
+                                        continue
+
+                                    created, candidates, errors = _bulk_exclude_unavailable_blocks(
+                                        site=site_scope,
+                                        equip=equip_label,
+                                        start_dt=start_dt,
+                                        end_dt=end_dt,
+                                        new_status=new_status,
+                                        comment=comment_txt,
+                                        user=user_txt or None,
+                                    )
+
+                                    total_created += created
+                                    total_candidates += candidates
+                                    error_messages.extend(errors)
+
+                                    if candidates == 0:
+                                        info_messages.append(
+                                            f"{equip_label}: aucun bloc indisponible sur la période sélectionnée."
+                                        )
+
+                            if total_created > 0:
+                                st.success(
+                                    f"✅ {total_created} exclusion{'s' if total_created > 1 else ''} créée{'s' if total_created > 1 else ''}"
+                                    f" et marquée{'s' if total_created > 1 else ''} comme {status_label}."
+                                )
+
+                                if info_messages:
+                                    st.info("\n".join(info_messages))
+
+                                if error_messages:
+                                    st.warning("\n".join(error_messages))
+
+                                st.balloons()
+                                st.rerun()
+                            else:
+                                if info_messages:
+                                    st.info("\n".join(info_messages))
+                                if error_messages:
+                                    st.error("\n".join(error_messages))
+                                if not info_messages and not error_messages:
+                                    st.info(
+                                        "Aucun bloc indisponible à exclure pour la période et la sélection indiquées."
                                     )
 
 def main():
