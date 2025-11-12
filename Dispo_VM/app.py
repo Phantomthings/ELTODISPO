@@ -1125,21 +1125,6 @@ def _bulk_exclude_missing_blocks(
     comment: str,
     user: Optional[str],
 ) -> Tuple[int, int, List[str]]:
-    """Applique une exclusion automatique sur les blocs manquants d'un équipement.
-
-    Args:
-        site: Code site concerné.
-        equip: Identifiant équipement (AC, DC1, PDC1, ...).
-        start_dt: Début de la fenêtre d'analyse.
-        end_dt: Fin de la fenêtre d'analyse.
-        new_status: Statut à appliquer (1 = disponible, 0 = indisponible).
-        comment: Commentaire associé à l'exclusion.
-        user: Opérateur ayant déclenché l'opération.
-
-    Returns:
-        Un tuple (nb_exclusions_créées, nb_blocs_candidats, liste_erreurs).
-    """
-
     mode = MODE_PDC if equip.upper().startswith("PDC") else MODE_EQUIPMENT
 
     try:
@@ -2874,7 +2859,6 @@ def render_overview_tab(
     df_general: Optional[pd.DataFrame],
     df_equipment: Optional[pd.DataFrame],
 ):
-    """Affiche l'onglet vue d'ensemble."""
     mode = get_current_mode()
     st.header("📈 Vue d'Ensemble")
 
@@ -2890,12 +2874,6 @@ def render_overview_tab(
             context_parts.append("l'ensemble des équipements")
     if context_parts:
         st.info("Vue générale : " + " et ".join(context_parts) + ".")
-
-    if equip_scope:
-        st.caption(
-            "ℹ️ Les indicateurs ci-dessous agrègent tous les équipements du site sélectionné. "
-            "Le filtre Équipement est appliqué uniquement à la section « Analyse des Indisponibilités » et à l'onglet timeline dédié."
-        )
 
     general_available = df_general is not None and not df_general.empty
     global_summary_row: Optional[Dict[str, Any]] = None
@@ -2989,7 +2967,6 @@ def render_overview_tab(
         st.divider()
 
         st.subheader("🔍 Analyse des disponibilités (IC/PC)")
-
         if start_dt_current and end_dt_current:
             icpc_stats = load_global_icpc_stats(
                 start_dt=start_dt_current,
@@ -3001,28 +2978,52 @@ def render_overview_tab(
                     "Aucune statistique IC/PC pré-calculée disponible pour la période sélectionnée."
                 )
             else:
-                display_icpc = icpc_stats.drop(columns=["Site", "Occurrences"], errors="ignore")
-                st.dataframe(
-                    display_icpc,
-                    hide_index=True,
-                    use_container_width=True,
-                    column_config={
-                        "Mois": st.column_config.TextColumn("Mois", width="small"),
-                        "IC/PC": st.column_config.TextColumn("IC/PC", width="medium"),
-                        "Disponibilité (%)": st.column_config.NumberColumn(
-                            "Disponibilité (%)",
-                            width="small",
-                            format="%.2f%%",
-                        ),
-                    },
-                )
+                if 'Équipement' in icpc_stats.columns:
+                    equipment_types = sorted(icpc_stats['Équipement'].unique())
+                    selected_eqp = st.selectbox(
+                        "🔧 Sélectionner le type d'équipement",
+                        options= equipment_types
+                    )
+                    filtered_stats = icpc_stats[icpc_stats['Équipement'] == selected_eqp].copy()
+                    display_icpc = filtered_stats.drop(
+                        columns=["Site", "Occurrences", "Équipement"], 
+                        errors="ignore"
+                    )
+                    
+                    st.dataframe(
+                        display_icpc,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "Mois": st.column_config.TextColumn("Mois", width="small"),
+                            "IC/PC": st.column_config.TextColumn("IC/PC", width="medium"),
+                            "Disponibilité (%)": st.column_config.NumberColumn(
+                                "Disponibilité (%)",
+                                width="small",
+                                format="%.2f%%",
+                            ),
+                        },
+                    )
+                else:
+                    st.warning("⚠️ La colonne 'Équipement' n'est pas encore présente dans les données.")
+                    display_icpc = icpc_stats.drop(columns=["Site", "Occurrences"], errors="ignore")
+                    st.dataframe(
+                        display_icpc,
+                        hide_index=True,
+                        use_container_width=True,
+                        column_config={
+                            "Mois": st.column_config.TextColumn("Mois", width="small"),
+                            "IC/PC": st.column_config.TextColumn("IC/PC", width="medium"),
+                            "Disponibilité (%)": st.column_config.NumberColumn(
+                                "Disponibilité (%)",
+                                width="small",
+                                format="%.2f%%",
+                            ),
+                        },
+                    )
         else:
             st.info("Sélectionnez une période d'analyse pour consulter les statistiques IC/PC.")
 
-        st.divider()
-    else:
-        st.warning("⚠️ Aucune donnée disponible pour les critères sélectionnés.")
-        st.info("💡 Conseil: Essayez d'élargir la période ou de modifier les filtres.")
         st.divider()
 
     st.subheader("🔍 Analyse des Indisponibilités")
@@ -3047,14 +3048,12 @@ def render_overview_tab(
         st.session_state["overview_unavailability_equip_filter"] = None
         previous_selection = None
 
-    select_options: List[Optional[str]] = [None, *equipment_options]
+    select_options: List[str] = equipment_options  
     default_index = 0
     if previous_selection in equipment_options:
         default_index = select_options.index(previous_selection)
 
-    def _format_overview_filter(value: Optional[str]) -> str:
-        if value is None:
-            return "Tous les équipements"
+    def _format_overview_filter(value: str) -> str: 
         label = str(value)
         if label.upper() not in available_equips:
             return f"{label} (sans données)"
@@ -3069,14 +3068,12 @@ def render_overview_tab(
         help="Limite l'analyse aux indisponibilités de l'équipement sélectionné.",
     )
 
-    if selected_unavailability_equip is not None:
+    if selected_unavailability_equip is not None:  
         equip_upper = selected_unavailability_equip.upper()
         df_unavailability_filtered = df_unavailability_source[
             df_unavailability_source["equipement_id"].astype(str).str.upper() == equip_upper
         ]
         st.session_state["current_equip"] = selected_unavailability_equip
-    else:
-        st.session_state["current_equip"] = None
 
     if df_unavailability_source.empty:
         st.info("ℹ️ Aucune donnée disponible pour analyser les indisponibilités sur cette période.")
@@ -3266,113 +3263,70 @@ def render_overview_tab(
 
 
 def render_global_comparison_tab(start_dt: datetime, end_dt: datetime) -> None:
-    """Affiche la vue comparative entre tous les sites."""
-    mode = get_current_mode()
     st.header("🌍 Vue générale - Comparaison tous les sites")
     st.caption(
         f"Période analysée : {start_dt.strftime('%Y-%m-%d')} ➜ {end_dt.strftime('%Y-%m-%d')}"
     )
 
-    df_all = load_filtered_blocks(start_dt, end_dt, None, None, mode=mode)
+    monthly_df = load_stored_contract_monthly(start_dt, end_dt)
 
-    if df_all is None or df_all.empty:
+    if monthly_df.empty:
         st.warning("Aucune donnée disponible pour la vue globale sur la période sélectionnée.")
         return
 
-    if mode == MODE_EQUIPMENT:
-        st.subheader("Disponibilité par site")
-        site_rows: List[Dict[str, Optional[float]]] = []
-        for site, site_df in df_all.groupby("site"):
-            stats_raw = calculate_availability(site_df, include_exclusions=False)
-            stats_excl = calculate_availability(site_df, include_exclusions=True)
-            site_rows.append(
-                {
-                    "Site": mapping_sites.get(str(site).split("_")[-1], str(site)),
-                    "Disponibilité brute (%)": round(stats_raw["pct_available"], 2),
-                    "Disponibilité avec exclusions (%)": round(
-                        stats_excl["pct_available"], 2
-                    ),
-                }
-            )
+    monthly_df["Site"] = monthly_df["Site"].str.replace("8822_", "").map(mapping_sites).fillna(monthly_df["Site"])
 
-        summary_df = pd.DataFrame(site_rows)
-        if summary_df.empty:
-            st.info("Aucune donnée consolidée disponible pour les sites.")
-        else:
-            summary_df = summary_df.sort_values("Site").reset_index(drop=True)
-            st.dataframe(
-                summary_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Site": st.column_config.TextColumn("Site", width="medium"),
-                    "Disponibilité brute (%)": st.column_config.NumberColumn(
-                        "Disponibilité brute (%)",
-                        width="medium",
-                        format="%.2f%%",
-                    ),
-                    "Disponibilité avec exclusions (%)": st.column_config.NumberColumn(
-                        "Disponibilité avec exclusions (%)",
-                        width="medium",
-                        format="%.2f%%",
-                    ),
-                },
-            )
+    st.subheader("Dispo globale par site")
+    
+    site_rows = []
+    for site in sorted(monthly_df["Site"].unique()):
+        site_df = monthly_df[monthly_df["Site"] == site]
+        site_rows.append({
+            "Site": site,
+            "Disponibilité brute (%)": round(site_df["Disponibilité brute (%)"].mean(), 2),
+            "Disponibilité avec exclusions (%)": round(site_df["Disponibilité avec exclusions (%)"].mean(), 2),
+        })
+
+    summary_df = pd.DataFrame(site_rows)
+    if summary_df.empty:
+        st.info("Aucune donnée consolidée disponible pour les sites.")
     else:
-        st.subheader("Dispo globale par site")
-        site_rows = []
-        for site, site_df in df_all.groupby("site"):
-            stats_raw = calculate_availability(site_df, include_exclusions=False)
-            stats_excl = calculate_availability(site_df, include_exclusions=True)
-            site_rows.append({
-                "Site": mapping_sites.get(str(site).split("_")[-1], str(site)),
-                "Disponibilité brute (%)": round(stats_raw["pct_available"], 2),
-                "Disponibilité avec exclusions (%)": round(stats_excl["pct_available"], 2),
-            })
-
-        summary_df = pd.DataFrame(site_rows)
-        if summary_df.empty:
-            st.info("Aucune donnée consolidée disponible pour les sites.")
-        else:
-            summary_df = summary_df.sort_values("Site").reset_index(drop=True)
-            st.dataframe(
-                summary_df,
-                hide_index=True,
-                use_container_width=True,
-                column_config={
-                    "Site": st.column_config.TextColumn("Site", width="medium"),
-                    "Disponibilité brute (%)": st.column_config.NumberColumn(
-                        "Disponibilité brute (%)",
-                        width="medium",
-                        format="%.2f%%",
-                    ),
-                    "Disponibilité avec exclusions (%)": st.column_config.NumberColumn(
-                        "Disponibilité avec exclusions (%)",
-                        width="medium",
-                        format="%.2f%%",
-                    ),
-                },
-            )
-
-        stats_all_raw = calculate_availability(df_all, include_exclusions=False)
-        stats_all_excl = calculate_availability(df_all, include_exclusions=True)
-        delta = stats_all_excl["pct_available"] - stats_all_raw["pct_available"]
-        col1, col2 = st.columns(2)
-        col1.metric(
-            "Disponibilité brute globale",
-            f"{stats_all_raw['pct_available']:.2f}%",
-            help="Disponibilité brute de l'ensemble des points de charge",
-        )
-        col2.metric(
-            "Disponibilité avec exclusions globale",
-            f"{stats_all_excl['pct_available']:.2f}%",
-            delta=f"{delta:.2f}%",
-            help="Comparaison brute vs exclusions sur tous les sites",
+        st.dataframe(
+            summary_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Site": st.column_config.TextColumn("Site", width="medium"),
+                "Disponibilité brute (%)": st.column_config.NumberColumn(
+                    "Disponibilité brute (%)",
+                    width="medium",
+                    format="%.2f%%",
+                ),
+                "Disponibilité avec exclusions (%)": st.column_config.NumberColumn(
+                    "Disponibilité avec exclusions (%)",
+                    width="medium",
+                    format="%.2f%%",
+                ),
+            },
         )
 
-
+    stats_all_raw = monthly_df["Disponibilité brute (%)"].mean()
+    stats_all_excl = monthly_df["Disponibilité avec exclusions (%)"].mean()
+    delta = stats_all_excl - stats_all_raw
+    
+    col1, col2 = st.columns(2)
+    col1.metric(
+        "Disponibilité brute globale",
+        f"{stats_all_raw:.2f}%",
+        help="Disponibilité brute moyenne de l'ensemble des sites",
+    )
+    col2.metric(
+        "Disponibilité avec exclusions globale",
+        f"{stats_all_excl:.2f}%",
+        delta=f"{delta:.2f}%",
+        help="Comparaison brute vs exclusions sur tous les sites",
+    )
 def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: datetime, end_dt: datetime):
-    """Affiche l'onglet timeline et annotations."""
     mode = get_current_mode()
     st.header("⏱️ Timeline Détaillée & Annotations")
 
@@ -3892,151 +3846,7 @@ def render_timeline_tab(site: Optional[str], equip: Optional[str], start_dt: dat
                         
                     except Exception as exc:
                         st.error(f"❌ Impossible d'ajouter le commentaire : {exc}")
-    with st.expander("⚡ Exclusion rapide des données manquantes", expanded=False):
-        month_default = datetime.now(ZoneInfo("Europe/Zurich")).date().replace(day=1)
-        month_candidates = [
-            ts.to_pydatetime().date() for ts in pd.date_range(end=month_default, periods=12, freq="MS")
-        ]
-        month_candidates.reverse()
-        default_index = month_candidates.index(month_default) if month_default in month_candidates else 0
-        target_month = st.selectbox(
-            "Mois concerné",
-            options=month_candidates,
-            index=default_index,
-            format_func=lambda d: d.strftime("%Y-%m"),
-            key="timeline_missing_month_picker",
-            help="Choisissez un mois pour exclure automatiquement toutes les données manquantes.",
-        )
-
-        month_start = target_month.replace(day=1)
-        if month_start.month == 12:
-            next_month = month_start.replace(year=month_start.year + 1, month=1)
-        else:
-            next_month = month_start.replace(month=month_start.month + 1)
-
-        st.markdown("**Sites concernés par l'exclusion automatique**")
-        exclusion_sites = ["AC", "DC1", "DC2", "PDC1", "PDC2", "PDC3", "PDC4", "PDC5", "PDC6"]
-        site_columns = st.columns(3)
-        selected_sites = []
-        for idx, site_label in enumerate(exclusion_sites):
-            col = site_columns[idx % len(site_columns)]
-            if col.checkbox(site_label, key=f"timeline_missing_site_{site_label.lower()}"):
-                selected_sites.append(site_label)
-
-        st.session_state["timeline_missing_selected_sites"] = selected_sites
-
-        default_comment = f"Exclusion automatique données manquantes {month_start.strftime('%Y-%m')}"
-        bulk_comment = st.text_input(
-            "Commentaire appliqué",
-            value=default_comment,
-            key="timeline_missing_month_comment",
-            help="Le commentaire sera répliqué sur chaque exclusion créée.",
-        )
-        bulk_user = st.text_input(
-            "Créé par",
-            placeholder="Votre nom",
-            key="timeline_missing_month_user",
-        )
-
-        col_apply_available, col_apply_unavailable = st.columns(2)
-        trigger_available = col_apply_available.button(
-            "✅ Exclure comme disponible",
-            key="timeline_missing_exclude_available",
-            use_container_width=True,
-        )
-        trigger_unavailable = col_apply_unavailable.button(
-            "❌ Exclure comme indisponible",
-            key="timeline_missing_exclude_unavailable",
-            use_container_width=True,
-        )
-
-        if trigger_available or trigger_unavailable:
-            if not selected_sites:
-                st.warning("Sélectionnez au moins un équipement à traiter.")
-            else:
-                site_scope = st.session_state.get("current_site")
-                if not site_scope:
-                    st.error(
-                        "Sélectionnez un site spécifique dans les filtres avant d'utiliser l'exclusion automatique."
-                    )
-                else:
-                    comment_txt = (bulk_comment or "").strip()
-                    if len(comment_txt) < 5:
-                        st.error("Le commentaire doit contenir au moins 5 caractères.")
-                    else:
-                        user_txt = (bulk_user or "").strip()
-                        start_dt = datetime.combine(month_start, time.min)
-                        end_dt = datetime.combine(next_month, time.min)
-                        new_status = 1 if trigger_available else 0
-                        status_label = "disponible" if new_status == 1 else "indisponible"
-
-                        available_equips = {s.upper() for s in get_equipments(MODE_EQUIPMENT, site_scope) or []}
-                        available_pdc = {s.upper() for s in get_equipments(MODE_PDC, site_scope) or []}
-
-                        total_created = 0
-                        total_candidates = 0
-                        info_messages: List[str] = []
-                        error_messages: List[str] = []
-
-                        with st.spinner("Application des exclusions automatiques..."):
-                            for equip_label in selected_sites:
-                                equip_upper = equip_label.upper()
-                                mode = MODE_PDC if equip_upper.startswith("PDC") else MODE_EQUIPMENT
-
-                                if mode == MODE_PDC and equip_upper not in available_pdc:
-                                    info_messages.append(
-                                        f"{equip_label}: aucun point de charge correspondant pour le site sélectionné."
-                                    )
-                                    continue
-
-                                if mode == MODE_EQUIPMENT and equip_upper not in available_equips:
-                                    info_messages.append(
-                                        f"{equip_label}: équipement indisponible sur le site sélectionné."
-                                    )
-                                    continue
-
-                                created, candidates, errors = _bulk_exclude_missing_blocks(
-                                    site=site_scope,
-                                    equip=equip_label,
-                                    start_dt=start_dt,
-                                    end_dt=end_dt,
-                                    new_status=new_status,
-                                    comment=comment_txt,
-                                    user=user_txt or None,
-                                )
-
-                                total_created += created
-                                total_candidates += candidates
-                                error_messages.extend(errors)
-
-                                if candidates == 0:
-                                    info_messages.append(
-                                        f"{equip_label}: aucune donnée manquante sur la période sélectionnée."
-                                    )
-
-                        if total_created > 0:
-                            st.success(
-                                f"✅ {total_created} exclusion{'s' if total_created > 1 else ''} créée{'s' if total_created > 1 else ''}"
-                                f" et marquée{'s' if total_created > 1 else ''} comme {status_label}."
-                            )
-
-                            if info_messages:
-                                st.info("\n".join(info_messages))
-
-                            if error_messages:
-                                st.warning("\n".join(error_messages))
-
-                            st.balloons()
-                            st.rerun()
-                        else:
-                            if info_messages:
-                                st.info("\n".join(info_messages))
-                            if error_messages:
-                                st.error("\n".join(error_messages))
-                            if not info_messages and not error_messages:
-                                st.info(
-                                    "Aucune donnée manquante à exclure pour la période et la sélection indiquées."
-                                )
+    
 def render_exclusions_tab():
     mode = get_current_mode()
     st.header("🚫 Gestion des exclusions")
@@ -5168,10 +4978,10 @@ def load_global_icpc_stats(
             conditions.append("(" + " OR ".join(variant_clauses) + ")")
 
     query = f"""
-        SELECT site, mois, icpc, pct, total_occurrences
+        SELECT site, mois, eqp, icpc, pct, total_occurrences
         FROM {GLOBAL_ICPC_STATS_TABLE}
         WHERE {' AND '.join(conditions)}
-        ORDER BY site, mois, icpc
+        ORDER BY site, mois, eqp, icpc
     """
 
     try:
@@ -5191,18 +5001,18 @@ def load_global_icpc_stats(
     )
     df["Site"] = df["site"].astype(str).map(mapping_sites).fillna(df["site"].astype(str))
     df["Mois"] = df["mois"].dt.strftime("%Y-%m")
+    df["Équipement"] = df["eqp"].astype(str)
     df["IC/PC"] = df["icpc"].astype(str)
     df["Disponibilité (%)"] = df["pct"].round(2)
     df["Occurrences"] = df["total_occurrences"]
-    columns = ["Site", "Mois", "IC/PC", "Disponibilité (%)", "Occurrences"]
-    return df[columns].sort_values(["Site", "Mois", "IC/PC"]).reset_index(drop=True)
-
+    
+    columns = ["Site", "Mois", "Équipement", "IC/PC", "Disponibilité (%)", "Occurrences"]
+    return df[columns].sort_values(["Site", "Mois", "Équipement", "IC/PC"]).reset_index(drop=True)
 
 def _month_bounds(start_dt: datetime, end_dt: datetime) -> Tuple[pd.Timestamp, pd.Timestamp]:
     start = pd.Timestamp(start_dt).to_period("M").to_timestamp()
     end = pd.Timestamp(end_dt).to_period("M").to_timestamp()
     return start, (end + pd.offsets.MonthBegin(1))
-
 
 def load_stored_contract_monthly(
     start_dt: datetime,
@@ -5214,9 +5024,12 @@ def load_stored_contract_monthly(
         SELECT
             site,
             period_start,
-            t2,
-            t_sum,
-            availability_pct,
+            t2_brut,
+            t2_excl,
+            t_sum_brut,
+            t_sum_excl,
+            availability_pct_brut,
+            availability_pct_excl,
             notes,
             computed_at
         FROM {CONTRACT_MONTHLY_TABLE}
@@ -5245,22 +5058,30 @@ def load_stored_contract_monthly(
     df["Site"] = df["site"].astype(str)
     df["period_start"] = pd.to_datetime(df["period_start"], errors="coerce")
     df["Mois"] = df["period_start"].dt.strftime("%Y-%m")
-    df["T2"] = df["t2"].astype(int)
-    df["T(11..16)+T3"] = df["t_sum"].astype(float).round(2)
-    df["Disponibilité (%)"] = df["availability_pct"].astype(float).round(2)
+    
+    df["T2 brut"] = pd.to_numeric(df["t2_brut"], errors="coerce").fillna(0).astype(int)
+    df["T2 excl"] = pd.to_numeric(df["t2_excl"], errors="coerce").fillna(0).astype(int)
+    df["T_sum brut"] = pd.to_numeric(df["t_sum_brut"], errors="coerce").fillna(0.0).round(2)
+    df["T_sum excl"] = pd.to_numeric(df["t_sum_excl"], errors="coerce").fillna(0.0).round(2)
+    df["Disponibilité brute (%)"] = pd.to_numeric(df["availability_pct_brut"], errors="coerce").fillna(0.0).round(2)
+    df["Disponibilité avec exclusions (%)"] = pd.to_numeric(df["availability_pct_excl"], errors="coerce").fillna(0.0).round(2)
+    
     df["Notes"] = df["notes"].fillna("")
     df["Calculé le"] = pd.to_datetime(df["computed_at"], errors="coerce")
+    
     columns = [
         "Site",
         "Mois",
-        "T2",
-        "T(11..16)+T3",
-        "Disponibilité (%)",
+        "T2 brut",
+        "T2 excl",
+        "T_sum brut",
+        "T_sum excl",
+        "Disponibilité brute (%)",
+        "Disponibilité avec exclusions (%)",
         "Notes",
         "Calculé le",
     ]
     return df[columns].sort_values(["Site", "Mois"]).reset_index(drop=True)
-
 
 def _run_contract_refresh_script() -> None:
     if not CONTRACT_SCRIPT_PATH.exists():
@@ -5450,30 +5271,64 @@ def render_contract_tab(site: Optional[str], start_dt: datetime, end_dt: datetim
     for warning in sorted(warning_messages):
         st.warning(warning)
 
-    global_availability = monthly_df["Disponibilité (%)"].mean()
-    col1, col2, col3 = st.columns(3)
+    monthly_df["Site"] = monthly_df["Site"].str.replace("8822_", "").map(mapping_sites).fillna(monthly_df["Site"])
+
+    global_availability_brut = monthly_df["Disponibilité brute (%)"].mean() if "Disponibilité brute (%)" in monthly_df.columns else 0.0
+    global_availability_excl = monthly_df["Disponibilité avec exclusions (%)"].mean() if "Disponibilité avec exclusions (%)" in monthly_df.columns else 0.0
+    delta = global_availability_excl - global_availability_brut
+
+    col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Disponibilité moyenne", f"{global_availability:.2f}%")
+        st.metric("Disponibilité brute moyenne", f"{global_availability_brut:.2f}%")
     with col2:
-        total_steps = int(monthly_df["T2"].sum())
-        st.metric("Nombre total de pas (T2)", f"{total_steps}")
+        st.metric(
+            "Disponibilité avec exclusions moyenne", 
+            f"{global_availability_excl:.2f}%",
+            delta=f"{delta:.2f}%"
+        )
     with col3:
+        total_steps = int(monthly_df["T2 brut"].sum()) if "T2 brut" in monthly_df.columns else 0
+        st.metric("Nombre total de pas (T2)", f"{total_steps}")
+    with col4:
         site_count = monthly_df["Site"].nunique()
         st.metric("Sites couverts", site_count)
 
-    st.dataframe(
-        monthly_df.drop(columns=["Notes"], errors="ignore"),
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Site": st.column_config.TextColumn("Site", width="medium"),
-            "Mois": st.column_config.TextColumn("Mois", width="medium"),
-            "T2": st.column_config.NumberColumn("T2", width="small"),
-            "T(11..16)+T3": st.column_config.NumberColumn("T(11..16)+T3", format="%.2f"),
-            "Disponibilité (%)": st.column_config.NumberColumn("Disponibilité (%)", format="%.2f"),
-            "Calculé le": st.column_config.DatetimeColumn("Calculé le", format="YYYY-MM-DD HH:mm"),
-        },
-    )
+    sites = sorted(monthly_df["Site"].unique())
+
+    for site_name in sites:
+        st.markdown(f"### 📍 {site_name}")
+        
+        site_df = monthly_df[monthly_df["Site"] == site_name].copy()
+        
+        site_brut = site_df["Disponibilité brute (%)"].mean()
+        site_excl = site_df["Disponibilité avec exclusions (%)"].mean()
+        site_delta = site_excl - site_brut
+        
+        col_a, col_b, col_c = st.columns(3)
+        with col_a:
+            st.metric("Dispo brute", f"{site_brut:.2f}%")
+        with col_b:
+            st.metric("Dispo avec exclusions", f"{site_excl:.2f}%", delta=f"{site_delta:.2f}%")
+        with col_c:
+            st.metric("Mois analysés", len(site_df))
+        
+        st.dataframe(
+            site_df.drop(columns=["Notes", "Site"], errors="ignore"),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Mois": st.column_config.TextColumn("Mois", width="medium"),
+                "T2 brut": st.column_config.NumberColumn("T2 brut", width="small"),
+                "T2 excl": st.column_config.NumberColumn("T2 excl", width="small"),
+                "T_sum brut": st.column_config.NumberColumn("T_sum brut", width="small", format="%.2f"),
+                "T_sum excl": st.column_config.NumberColumn("T_sum excl", width="small", format="%.2f"),
+                "Disponibilité brute (%)": st.column_config.NumberColumn("Dispo brute (%)", width="medium", format="%.2f%%"),
+                "Disponibilité avec exclusions (%)": st.column_config.NumberColumn("Dispo excl (%)", width="medium", format="%.2f%%"),
+                "Calculé le": st.column_config.DatetimeColumn("Calculé le", format="YYYY-MM-DD HH:mm"),
+            },
+        )
+        
+        st.divider()
 
     if "Calculé le" in monthly_df.columns and not monthly_df["Calculé le"].isna().all():
         last_update = monthly_df["Calculé le"].max()
@@ -5481,17 +5336,38 @@ def render_contract_tab(site: Optional[str], start_dt: datetime, end_dt: datetim
             st.caption(
                 f"Dernière mise à jour contractuelle : {last_update.strftime('%Y-%m-%d %H:%M')}"
             )
-    evo_df = monthly_df[["Mois", "Site", "Disponibilité (%)"]].copy()
-    evo_df = evo_df[pd.notna(evo_df["Disponibilité (%)"])]
-    if not evo_df.empty:
-        evo_df["__mois_dt"] = pd.to_datetime(evo_df["Mois"] + "-01", errors="coerce")
-        trend_df = (
-            evo_df.sort_values(["__mois_dt", "Site"])
-            .pivot(index="__mois_dt", columns="Site", values="Disponibilité (%)")
-        )
-        trend_df.index = trend_df.index.strftime("%Y-%m")
-        st.line_chart(trend_df)
 
+    st.subheader("📈 Évolution des disponibilités")
+
+    tabs = st.tabs(["Disponibilité brute", "Disponibilité avec exclusions"])
+
+    with tabs[0]:
+        evo_df_brut = monthly_df[["Mois", "Site", "Disponibilité brute (%)"]].copy()
+        evo_df_brut = evo_df_brut[pd.notna(evo_df_brut["Disponibilité brute (%)"])]
+        if not evo_df_brut.empty:
+            evo_df_brut["__mois_dt"] = pd.to_datetime(evo_df_brut["Mois"] + "-01", errors="coerce")
+            trend_df_brut = (
+                evo_df_brut.sort_values(["__mois_dt", "Site"])
+                .pivot(index="__mois_dt", columns="Site", values="Disponibilité brute (%)")
+            )
+            trend_df_brut.index = trend_df_brut.index.strftime("%Y-%m")
+            st.line_chart(trend_df_brut)
+        else:
+            st.info("Aucune donnée pour afficher l'évolution de la disponibilité brute.")
+
+    with tabs[1]:
+        evo_df_excl = monthly_df[["Mois", "Site", "Disponibilité avec exclusions (%)"]].copy()
+        evo_df_excl = evo_df_excl[pd.notna(evo_df_excl["Disponibilité avec exclusions (%)"])]
+        if not evo_df_excl.empty:
+            evo_df_excl["__mois_dt"] = pd.to_datetime(evo_df_excl["Mois"] + "-01", errors="coerce")
+            trend_df_excl = (
+                evo_df_excl.sort_values(["__mois_dt", "Site"])
+                .pivot(index="__mois_dt", columns="Site", values="Disponibilité avec exclusions (%)")
+            )
+            trend_df_excl.index = trend_df_excl.index.strftime("%Y-%m")
+            st.line_chart(trend_df_excl)
+        else:
+            st.info("Aucune donnée pour afficher l'évolution de la disponibilité avec exclusions.")
 def calcul():
     st.header("Réseau AC")
     with st.expander("AC"):
@@ -5727,7 +5603,151 @@ def render_statistics_tab() -> None:
 
         if idx < len(selected_sites):
             st.divider()
+    with st.expander("⚡ Exclusion rapide des données manquantes", expanded=False):
+            month_default = datetime.now(ZoneInfo("Europe/Zurich")).date().replace(day=1)
+            month_candidates = [
+                ts.to_pydatetime().date() for ts in pd.date_range(end=month_default, periods=12, freq="MS")
+            ]
+            month_candidates.reverse()
+            default_index = month_candidates.index(month_default) if month_default in month_candidates else 0
+            target_month = st.selectbox(
+                "Mois concerné",
+                options=month_candidates,
+                index=default_index,
+                format_func=lambda d: d.strftime("%Y-%m"),
+                key="timeline_missing_month_picker",
+                help="Choisissez un mois pour exclure automatiquement toutes les données manquantes.",
+            )
 
+            month_start = target_month.replace(day=1)
+            if month_start.month == 12:
+                next_month = month_start.replace(year=month_start.year + 1, month=1)
+            else:
+                next_month = month_start.replace(month=month_start.month + 1)
+
+            st.markdown("**Sites concernés par l'exclusion automatique**")
+            exclusion_sites = ["AC", "DC1", "DC2", "PDC1", "PDC2", "PDC3", "PDC4", "PDC5", "PDC6"]
+            site_columns = st.columns(3)
+            selected_sites = []
+            for idx, site_label in enumerate(exclusion_sites):
+                col = site_columns[idx % len(site_columns)]
+                if col.checkbox(site_label, key=f"timeline_missing_site_{site_label.lower()}"):
+                    selected_sites.append(site_label)
+
+            st.session_state["timeline_missing_selected_sites"] = selected_sites
+
+            default_comment = f"Exclusion automatique données manquantes {month_start.strftime('%Y-%m')}"
+            bulk_comment = st.text_input(
+                "Commentaire appliqué",
+                value=default_comment,
+                key="timeline_missing_month_comment",
+                help="Le commentaire sera répliqué sur chaque exclusion créée.",
+            )
+            bulk_user = st.text_input(
+                "Créé par",
+                placeholder="Votre nom",
+                key="timeline_missing_month_user",
+            )
+
+            col_apply_available, col_apply_unavailable = st.columns(2)
+            trigger_available = col_apply_available.button(
+                "✅ Exclure comme disponible",
+                key="timeline_missing_exclude_available",
+                use_container_width=True,
+            )
+            trigger_unavailable = col_apply_unavailable.button(
+                "❌ Exclure comme indisponible",
+                key="timeline_missing_exclude_unavailable",
+                use_container_width=True,
+            )
+
+            if trigger_available or trigger_unavailable:
+                if not selected_sites:
+                    st.warning("Sélectionnez au moins un équipement à traiter.")
+                else:
+                    site_scope = st.session_state.get("current_site")
+                    if not site_scope:
+                        st.error(
+                            "Sélectionnez un site spécifique dans les filtres avant d'utiliser l'exclusion automatique."
+                        )
+                    else:
+                        comment_txt = (bulk_comment or "").strip()
+                        if len(comment_txt) < 5:
+                            st.error("Le commentaire doit contenir au moins 5 caractères.")
+                        else:
+                            user_txt = (bulk_user or "").strip()
+                            start_dt = datetime.combine(month_start, time.min)
+                            end_dt = datetime.combine(next_month, time.min)
+                            new_status = 1 if trigger_available else 0
+                            status_label = "disponible" if new_status == 1 else "indisponible"
+
+                            available_equips = {s.upper() for s in get_equipments(MODE_EQUIPMENT, site_scope) or []}
+                            available_pdc = {s.upper() for s in get_equipments(MODE_PDC, site_scope) or []}
+
+                            total_created = 0
+                            total_candidates = 0
+                            info_messages: List[str] = []
+                            error_messages: List[str] = []
+
+                            with st.spinner("Application des exclusions automatiques..."):
+                                for equip_label in selected_sites:
+                                    equip_upper = equip_label.upper()
+                                    mode = MODE_PDC if equip_upper.startswith("PDC") else MODE_EQUIPMENT
+
+                                    if mode == MODE_PDC and equip_upper not in available_pdc:
+                                        info_messages.append(
+                                            f"{equip_label}: aucun point de charge correspondant pour le site sélectionné."
+                                        )
+                                        continue
+
+                                    if mode == MODE_EQUIPMENT and equip_upper not in available_equips:
+                                        info_messages.append(
+                                            f"{equip_label}: équipement indisponible sur le site sélectionné."
+                                        )
+                                        continue
+
+                                    created, candidates, errors = _bulk_exclude_missing_blocks(
+                                        site=site_scope,
+                                        equip=equip_label,
+                                        start_dt=start_dt,
+                                        end_dt=end_dt,
+                                        new_status=new_status,
+                                        comment=comment_txt,
+                                        user=user_txt or None,
+                                    )
+
+                                    total_created += created
+                                    total_candidates += candidates
+                                    error_messages.extend(errors)
+
+                                    if candidates == 0:
+                                        info_messages.append(
+                                            f"{equip_label}: aucune donnée manquante sur la période sélectionnée."
+                                        )
+
+                            if total_created > 0:
+                                st.success(
+                                    f"✅ {total_created} exclusion{'s' if total_created > 1 else ''} créée{'s' if total_created > 1 else ''}"
+                                    f" et marquée{'s' if total_created > 1 else ''} comme {status_label}."
+                                )
+
+                                if info_messages:
+                                    st.info("\n".join(info_messages))
+
+                                if error_messages:
+                                    st.warning("\n".join(error_messages))
+
+                                st.balloons()
+                                st.rerun()
+                            else:
+                                if info_messages:
+                                    st.info("\n".join(info_messages))
+                                if error_messages:
+                                    st.error("\n".join(error_messages))
+                                if not info_messages and not error_messages:
+                                    st.info(
+                                        "Aucune donnée manquante à exclure pour la période et la sélection indiquées."
+                                    )
 
 def main():
     """Point d'entrée principal de l'application."""
@@ -5773,10 +5793,6 @@ def main():
                     equip,
                     mode=_mode_for_equipment(equip),
                 )
-
-        if not equip_selected:
-            st.info("ℹ️ Utilisez les sélecteurs dédiés dans les sections d'analyse et de timeline pour cibler un équipement spécifique.")
-
     if df_general is None:
         logger.warning("Aucune donnée reçue pour la vue générale, utilisation d'un DataFrame vide")
         df_general = pd.DataFrame()
