@@ -5682,18 +5682,53 @@ def render_statistics_tab() -> None:
         condition_intervals = stats.get("condition_intervals", {})
         downtime_intervals = stats.get("downtime_intervals", [])
 
-        availability_pct = float(metrics.get("availability_pct", 0.0) or 0.0)
+        stored_general_df = st.session_state.get("general_blocks_df")
+        stored_site = st.session_state.get("general_blocks_site")
+        stored_start = st.session_state.get("general_blocks_start")
+        stored_end = st.session_state.get("general_blocks_end")
+
+        combined_blocks = pd.DataFrame()
+        if (
+            isinstance(stored_general_df, pd.DataFrame)
+            and not stored_general_df.empty
+            and stored_site == site
+            and stored_start == start_dt
+            and stored_end == end_dt
+        ):
+            combined_blocks = stored_general_df
+
+        if combined_blocks.empty:
+            try:
+                equipment_blocks = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_EQUIPMENT)
+                pdc_blocks = load_filtered_blocks(start_dt, end_dt, site, None, mode=MODE_PDC)
+                frames = [df for df in (equipment_blocks, pdc_blocks) if df is not None and not df.empty]
+                combined_blocks = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+            except Exception as exc:
+                logger.warning(
+                    "Impossible de charger les blocs agrégés pour %s : %s",
+                    site,
+                    exc,
+                )
+                combined_blocks = pd.DataFrame()
+
+        raw_stats = calculate_availability(combined_blocks, include_exclusions=False)
+        excl_stats = calculate_availability(combined_blocks, include_exclusions=True)
+
+        availability_brute = float(raw_stats.get("pct_available", 0.0) or 0.0)
+        availability_excl = float(excl_stats.get("pct_available", 0.0) or 0.0)
         downtime_minutes = int(metrics.get("downtime_minutes", 0) or 0)
         reference_minutes = int(metrics.get("reference_minutes", 0) or 0)
         uptime_minutes = int(metrics.get("uptime_minutes", max(reference_minutes - downtime_minutes, 0)))
         window_minutes = int(metrics.get("window_minutes", 0) or 0)
         coverage_pct = float(metrics.get("coverage_pct", 0.0) or 0.0)
-        col1, col2, col3 = st.columns(3)
+        col1, col2, col3, col4 = st.columns(4)
         with col1:
-            st.metric("Disponibilité estimée", f"{availability_pct:.2f}%")
+            st.metric("Disponibilité Brute (%)", f"{availability_brute:.2f}%")
         with col2:
-            st.metric("Indisponibilité réelle de la station", format_minutes(downtime_minutes))
+            st.metric("Disponibilité Avec Exclusions (%)", f"{availability_excl:.2f}%")
         with col3:
+            st.metric("Indisponibilité réelle de la station", format_minutes(downtime_minutes))
+        with col4:
             st.metric(
                 "Temps analysé",
                 format_minutes(reference_minutes),
@@ -6178,6 +6213,11 @@ def main():
     if df_equipment is None:
         logger.warning("Aucune donnée reçue pour la vue équipement, utilisation d'un DataFrame vide")
         df_equipment = pd.DataFrame()
+
+    st.session_state["general_blocks_df"] = df_general
+    st.session_state["general_blocks_site"] = site if site_selected else None
+    st.session_state["general_blocks_start"] = start_dt
+    st.session_state["general_blocks_end"] = end_dt
 
     if not df_general.empty:
         st.caption(f"🌐 {len(df_general)} blocs agrégés pour la vue générale")
