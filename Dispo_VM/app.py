@@ -8,7 +8,6 @@ import sys
 import numbers
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta, timezone
-from itertools import cycle
 from pathlib import Path
 from typing import Any, Dict, Optional, List, Tuple, Set, Callable
 import logging
@@ -113,7 +112,6 @@ def _format_timestamp_display(value: Any) -> str:
         return value.strftime("%Y-%m-%d %H:%M:%S")
     if isinstance(value, datetime):
         if value.tzinfo is not None:
-            from zoneinfo import ZoneInfo
             value = value.astimezone(ZoneInfo('Europe/Zurich')).replace(tzinfo=None)
         return value.strftime("%Y-%m-%d %H:%M:%S")
     return str(value)
@@ -2681,63 +2679,6 @@ def analyze_daily_unavailability(unavailable_data: pd.DataFrame) -> pd.DataFrame
     daily_df = pd.DataFrame(daily_stats)
     if not daily_df.empty:
         daily_df = daily_df.sort_values("Date", ascending=False)
-    
-    return daily_df
-
-def analyze_daily_unavailability_by_equipment(unavailable_data: pd.DataFrame) -> pd.DataFrame:
-    """Analyse les indisponibilités par jour et par équipement."""
-    if unavailable_data.empty:
-        return pd.DataFrame()
-    
-    # Convertir les dates en datetime si nécessaire
-    unavailable_data = unavailable_data.copy()
-    unavailable_data["date_debut"] = pd.to_datetime(unavailable_data["date_debut"])
-    unavailable_data["date_fin"] = pd.to_datetime(unavailable_data["date_fin"])
-    
-    # Extraire la date (sans l'heure) pour le groupement
-    unavailable_data["date_jour"] = unavailable_data["date_debut"].dt.date
-    
-    # Grouper par jour et équipement
-    daily_stats = []
-    
-    for (date_jour, equip), group in unavailable_data.groupby(["date_jour", "Équipement"]):
-        # Compter le nombre de périodes d'indisponibilité
-        nb_periodes = len(group)
-        
-        # Calculer la durée totale d'indisponibilité pour ce jour et cet équipement
-        duree_totale_minutes = group["Durée_Minutes"].sum()
-        
-        # Trouver la première et dernière heure d'indisponibilité
-        heure_debut = group["date_debut"].min().strftime("%H:%M")
-        heure_fin = group["date_fin"].max().strftime("%H:%M")
-        
-        # Calculer le pourcentage de la journée en indisponibilité
-        # Supposons une journée de 24h = 1440 minutes
-        pourcentage_journee = (duree_totale_minutes / 1440) * 100
-        
-        # Traduire le nom du jour en français
-        jours_fr = {
-            'Monday': 'Lundi', 'Tuesday': 'Mardi', 'Wednesday': 'Mercredi',
-            'Thursday': 'Jeudi', 'Friday': 'Vendredi', 'Saturday': 'Samedi', 'Sunday': 'Dimanche'
-        }
-        jour_nom = jours_fr.get(date_jour.strftime("%A"), date_jour.strftime("%A"))
-        
-        daily_stats.append({
-            "Date": date_jour.strftime("%Y-%m-%d"),
-            "Jour": jour_nom,
-            "Équipement": equip,
-            "Nb Périodes": nb_periodes,
-            "Durée Totale": format_minutes(duree_totale_minutes),
-            "Durée_Minutes": duree_totale_minutes,  # Pour le tri
-            "Première Heure": heure_debut,
-            "Dernière Heure": heure_fin,
-            "% Journée": f"{pourcentage_journee:.1f}%"
-        })
-    
-    # Trier par date décroissante puis par durée décroissante
-    daily_df = pd.DataFrame(daily_stats)
-    if not daily_df.empty:
-        daily_df = daily_df.sort_values(["Date", "Durée_Minutes"], ascending=[False, False])
     
     return daily_df
 
