@@ -6162,6 +6162,175 @@ def render_statistics_tab() -> None:
                                         "Aucun bloc indisponible à exclure pour la période et la sélection indiquées."
                                     )
 
+@st.cache_data(ttl=600)
+def load_exclusion_tickets() -> pd.DataFrame:
+    """Charge la table Dispo.Exclu_ticket depuis la base de données."""
+
+    query = """
+        SELECT
+            id_indispo,
+            Projet_global,
+            project_id,
+            borne_id,
+            starttime,
+            endtime,
+            responsability,
+            ticket_id
+        FROM Dispo.Exclu_ticket
+        ORDER BY starttime DESC
+    """
+
+    try:
+        return execute_query(query)
+    except DatabaseError as exc:
+        st.error(f"❌ Impossible de charger les tickets d'exclusion : {exc}")
+        return pd.DataFrame()
+def extract_site_code(site_value: Any) -> str:
+    """Retourne le code site à partir d'une valeur brute (ex: "7951-001")."""
+    if site_value is None:
+        return ""
+
+    site_str = str(site_value).strip()
+    if not site_str:
+        return ""
+
+    if site_str in mapping_sites:
+        return site_str
+
+    parts = [segment for segment in re.split(r"[_-]", site_str) if segment]
+    for segment in reversed(parts):
+        if segment in mapping_sites:
+            return segment
+
+    return parts[-1] if parts else site_str
+def _format_timestamp(value: Any) -> str:
+    """Formate un timestamp ou renvoie '—' si vide."""
+
+    if pd.isna(value) or value is None:
+        return "—"
+
+    try:
+        ts = pd.to_datetime(value)
+    except (TypeError, ValueError):
+        return str(value)
+
+    if pd.isna(ts):
+        return "—"
+
+    return ts.strftime("%Y-%m-%d %H:%M")
+def render_tickets_tab() -> None:
+    st.header("Tickets d'exclusion importés")
+
+    df = load_exclusion_tickets()
+
+    if df.empty:
+        st.info("Aucun ticket d'exclusion n'a été importé pour le moment.")
+        return
+
+    df = df.copy()
+    df["project_id"] = df["project_id"].astype(str).replace({"nan": ""})
+    df["Site"] = df["project_id"].apply(extract_site_code).map(mapping_sites).fillna("")
+    df["Début"] = df["starttime"].apply(_format_timestamp)
+    df["Fin"] = df["endtime"].apply(_format_timestamp)
+
+    def _format_ticket(value: Any) -> str:
+        if pd.isna(value) or value in ("", None):
+            return None
+        try:
+            return str(int(value))
+        except (TypeError, ValueError):
+            text_value = str(value)
+            return text_value if text_value else None
+
+    df["Ticket"] = df["ticket_id"].apply(_format_ticket)
+    df = df[df["Ticket"].notna()].copy()
+
+    if df.empty:
+        st.info("Aucun ticket d'exclusion avec identifiant valide n'a été importé pour le moment.")
+        return
+
+    display_cols = [
+        "Ticket",
+        "Site",
+        "Projet_global",
+        "project_id",
+        "borne_id",
+        "responsability",
+        "Début",
+        "Fin",
+    ]
+
+    df_display = df[display_cols].rename(
+        columns={
+            "Projet_global": "Projet",
+            "project_id": "Project ID",
+            "borne_id": "Borne",
+            "responsability": "Responsabilité",
+        }
+    )
+
+    try:
+        link_column_signature = pyinspect.signature(st.column_config.LinkColumn)
+        supports_ticket_url = "url" in link_column_signature.parameters
+    except (TypeError, ValueError):
+        supports_ticket_url = False
+
+    column_config: Dict[str, Any] = {}
+    editor_kwargs: Dict[str, Any] = {}
+    df_editor = df_display
+    ticket_help = "Ouvrir le ticket sur ELTO"
+
+    if supports_ticket_url:
+        column_config["Ticket"] = st.column_config.LinkColumn(
+            "Ticket",
+            help=ticket_help,
+            url=TICKET_URL_TEMPLATE,
+        )
+        caption_message = (
+            f"{len(df_display)} ticket(s) synchronisé(s). Cliquez sur l'identifiant pour ouvrir le ticket ELTO dans un nouvel onglet."
+        )
+    else:
+        def _build_ticket_url(ticket_value: Any) -> str:
+            if pd.isna(ticket_value):
+                return ""
+            return TICKET_URL_TEMPLATE.format(ticket_value)
+
+        df_editor = df_display.copy()
+        df_editor.insert(1, "Ticket (Lien)", df_display["Ticket"].map(_build_ticket_url))
+
+        column_config["Ticket"] = st.column_config.TextColumn(
+            "Ticket",
+            help="Identifiant du ticket NW Borne",
+        )
+        column_config["Ticket (Lien)"] = st.column_config.LinkColumn(
+            "Ouvrir",
+            help=ticket_help,
+        )
+
+        editor_kwargs["column_order"] = [
+            "Ticket",
+            "Ticket (Lien)",
+            *[
+                col
+                for col in df_editor.columns
+                if col not in {"Ticket", "Ticket (Lien)"}
+            ],
+        ]
+
+        caption_message = (
+            f"{len(df_display)} ticket(s) synchronisé(s). Utilisez le lien 'Ouvrir' pour accéder au ticket NW Borne dans un nouvel onglet."
+        )
+
+    st.caption(caption_message)
+
+    st.data_editor(
+        df_editor,
+        hide_index=True,
+        disabled=True,
+        use_container_width=True,
+        column_config=column_config,
+        **editor_kwargs,
+    )
 def main():
     """Point d'entrée principal de l'application."""
     
@@ -6233,6 +6402,7 @@ def main():
         "💬 Commentaires",
         "ℹ️ Info calcul",
         "📄 Contrat",
+        "🚩 Tickets",
     ])
 
     with tabs[0]:
@@ -6258,6 +6428,9 @@ def main():
 
     with tabs[7]:
         render_contract_tab(site, start_dt, end_dt)
+
+    with tabs[8]:
+        render_tickets_tab()
 
     st.divider()
     col1, col2, col3 = st.columns(3)
