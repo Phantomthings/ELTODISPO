@@ -6176,7 +6176,7 @@ def load_exclusion_tickets() -> pd.DataFrame:
             endtime,
             responsability,
             ticket_id
-        FROM Dispo.Exclu_ticket
+        FROM indicator.Exclu_ticket
         ORDER BY starttime DESC
     """
 
@@ -6318,7 +6318,7 @@ def render_tickets_tab() -> None:
         ]
 
         caption_message = (
-            f"{len(df_display)} ticket(s) synchronisé(s). Utilisez le lien 'Ouvrir' pour accéder au ticket NW Borne dans un nouvel onglet."
+            f"{len(df_display)} ticket(s) synchronisé(s)."
         )
 
     st.caption(caption_message)
@@ -6331,6 +6331,7 @@ def render_tickets_tab() -> None:
         column_config=column_config,
         **editor_kwargs,
     )
+
 def main():
     """Point d'entrée principal de l'application."""
     
